@@ -87,11 +87,13 @@ export interface BindingTag<
   Tag extends string,
   Fn extends BindingFn<Req> = any,
   Req = any,
-> extends ServiceMap.Service<Tag, Fn> {
+> {
   tag: Tag;
   fn: Fn;
   Req: Req;
   new (): BindingTag<Tag, Fn, Req>;
+  service<Self>(): ServiceMap.Service<Instance<Self>, Fn>;
+  layer<Self>(this: Self): Layer.Layer<Instance<Self>, never, Req>;
 }
 
 export const fn = <B extends BindingTag<any, any, any>>(
@@ -101,7 +103,7 @@ export const fn = <B extends BindingTag<any, any, any>>(
 ) => Effect.Effect<void, never, B | B["Req"]>) =>
   Effect.fn(function* () {
     if ((yield* Phase) === "plan") {
-      return yield* Service(tag);
+      return yield* Service(tag).service();
     } else {
       return (yield* Runtime).get(tag);
     }
