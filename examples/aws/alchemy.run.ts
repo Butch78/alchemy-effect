@@ -33,15 +33,15 @@ const awsConfig = Layer.effect(
         `AWS SSO Profile '${profileName}' is missing sso_account_id configuration`,
       );
     }
-    return {
+    return AWS.StageConfig.of({
       profile: profileName,
       account: profile.sso_account_id,
       region: profile.region ?? (yield* AWS_REGION),
-    };
+    });
   }),
 );
 
-const stack = Effect.gen(function* () {
+export default Effect.gen(function* () {
   const func = yield* JobFunction;
   const bucket = yield* AWS.S3.Bucket("JobsBucket");
 
@@ -53,7 +53,3 @@ const stack = Effect.gen(function* () {
   Effect.provide(Layer.provide(AWS.providers(), awsConfig)),
   Stack.make("JobStack"),
 );
-
-type _ = Effect.Services<typeof stack>;
-
-export default stack;

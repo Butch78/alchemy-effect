@@ -9,6 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import { Path } from "effect/Path";
 import * as Schedule from "effect/Schedule";
+import type { Scope } from "effect/Scope";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { ESBuild } from "../../Bundle/index.ts";
 import { DotAlchemy } from "../../Config.ts";
@@ -72,7 +73,12 @@ export interface FunctionAttr<Props extends FunctionProps> {
   };
 }
 
-export type Provided = Credentials | Region | HttpClient | ExecutionContext;
+export type Provided =
+  | Credentials
+  | Region
+  | HttpClient
+  | ExecutionContext
+  | Scope;
 
 export const Function = Resource<{
   <
