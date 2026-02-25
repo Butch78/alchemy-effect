@@ -2,7 +2,7 @@ import type * as lambda from "aws-lambda";
 import type * as sqs from "distilled-aws/sqs";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
-import { Runtime } from "../../Runtime.ts";
+import { ExecutionContext } from "../../ExecutionContext.ts";
 import { DeleteMessageBatch } from "./DeleteMessageBatch.ts";
 import type { Queue } from "./Queue.ts";
 import {
@@ -38,14 +38,15 @@ export const messages = <Q extends Queue>(
       stream: Stream.Stream<lambda.SQSRecord, never, StreamReq>,
     ) => Effect.Effect<void, never, EffectReq>,
   ) {
-    const runtime = yield* Runtime;
+    const ctx = yield* ExecutionContext;
 
-    const QueueArn = yield* queue.queueArn();
+    const QueueArn = yield* queue.queueArn;
 
-    if (runtime.listen) {
+    if (ctx.listen) {
+      // Function
       yield* QueueEventSource(queue, props);
 
-      yield* runtime.listen(
+      yield* ctx.listen(
         Effect.gen(function* () {
           const queueArn = yield* QueueArn;
           return (event: any) => {
@@ -64,10 +65,11 @@ export const messages = <Q extends Queue>(
         }),
       );
     } else {
+      // Process
       const receiveMessage = yield* ReceiveMessage(queue);
       const deleteMessageBatch = yield* DeleteMessageBatch(queue);
 
-      yield* runtime.run(
+      yield* ctx.run(
         Effect.forever(
           Effect.gen(function* () {
             const queueArn = yield* QueueArn;

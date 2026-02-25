@@ -1,4 +1,5 @@
 import type * as lambda from "aws-lambda";
+import type { Credentials } from "distilled-aws/Credentials";
 import * as iam from "distilled-aws/iam";
 import type { CreateFunctionRequest } from "distilled-aws/lambda";
 import * as Lambda from "distilled-aws/lambda";
@@ -8,13 +9,17 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import { Path } from "effect/Path";
 import * as Schedule from "effect/Schedule";
+import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { App } from "../../App.ts";
 import { ESBuild } from "../../Bundle/index.ts";
 import { DotAlchemy } from "../../Config.ts";
-import type { Input } from "../../index.ts";
+import type {
+  ExecutionContext,
+  FunctionExecutionContext,
+} from "../../ExecutionContext.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource } from "../../Resource.ts";
-import type { EventRuntimeService } from "../../Runtime.ts";
+import type { Provider } from "../../Provider.ts";
+import { Resource, type ResourceLike } from "../../Resource.ts";
 import { createInternalTags, createTagsList, hasTags } from "../../Tags.ts";
 import { sha256 } from "../../Util/sha256.ts";
 import { zipCode } from "../../Util/zip.ts";
@@ -52,7 +57,9 @@ export interface FunctionBinding {
 export interface FunctionAttr<Props extends FunctionProps> {
   functionArn: string;
   functionName: string;
-  functionUrl: Props["url"] extends true ? string : undefined;
+  functionUrl: Props["url"] extends true
+    ? `http${"s" | ""}://${string}`
+    : undefined;
   roleName: string;
   roleArn: string;
   code: {
@@ -60,17 +67,18 @@ export interface FunctionAttr<Props extends FunctionProps> {
   };
 }
 
+export type Provided = Credentials | Region | HttpClient | ExecutionContext;
+
 export const Function = Resource<{
-  env: Record<string, Input<string>>;
-  policyStatements: Input<PolicyStatement[]>;
   <
     const Id extends string,
     const Props extends FunctionProps = never,
-    Req = never,
+    // we auto-provide Provided, and expect Resources to bubble out into our Stack Req
+    Req extends Provided | ResourceLike | Provider<any> = never,
   >(
     id: Id,
     effect: Effect.Effect<Props, never, Req>,
-  ): Effect.Effect<Function<Id, Props>, never, Req>;
+  ): Effect.Effect<Function<Id, Props>, never, Exclude<Req, Provided>>;
 }>("AWS.Lambda.Function");
 
 export interface Function<
@@ -78,8 +86,9 @@ export interface Function<
   Props extends FunctionProps = any,
 >
   extends
-    EventRuntimeService<"AWS.Lambda.Function">,
+    FunctionExecutionContext<"AWS.Lambda.Function">,
     Resource<
+      Function,
       "AWS.Lambda.Function",
       Id,
       Props,

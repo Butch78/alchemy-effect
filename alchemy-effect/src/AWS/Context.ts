@@ -11,19 +11,20 @@ export const withContext = Effect.fn(function* <
   Err = never,
   Req = never,
 >(fn: (request: Input) => Effect.Effect<A, Err, Req>) {
-  const credentials = yield* Credentials;
-  const region = yield* Region;
-  const httpClient = yield* HttpClient;
+  const ctx = yield* context();
   return (
     request: Input,
   ): Effect.Effect<A, Err, Exclude<Req, Credentials | Region | HttpClient>> =>
-    fn(request).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          Layer.succeed(Credentials, credentials),
-          Layer.succeed(Region, region),
-          Layer.succeed(HttpClient, httpClient),
-        ),
-      ),
-    );
+    fn(request).pipe(Effect.provide(ctx));
+});
+
+export const context = Effect.fn(function* () {
+  const credentials = yield* Credentials;
+  const region = yield* Region;
+  const httpClient = yield* HttpClient;
+  return Layer.mergeAll(
+    Layer.succeed(Credentials, credentials),
+    Layer.succeed(Region, region),
+    Layer.succeed(HttpClient, httpClient),
+  );
 });

@@ -1,15 +1,12 @@
 import * as Effect from "effect/Effect";
 import * as ServiceMap from "effect/ServiceMap";
 
-export class Runtime extends ServiceMap.Service<Runtime, RuntimeService>()(
-  "Alchemy::Runtime",
-) {}
+export class ExecutionContext extends ServiceMap.Service<
+  ExecutionContext,
+  FunctionExecutionContext | DaemonExecutionContext
+>()("Alchemy::ExecutionContext") {}
 
-export type RuntimeService<Type extends string = string> =
-  | EventRuntimeService<Type>
-  | ProcessRuntimeService<Type>;
-
-export interface BaseRuntimeService<Type extends string> {
+interface BaseExecutionContext<Type extends string> {
   type: Type;
   /**
    * Get a value from the Runtime
@@ -17,9 +14,9 @@ export interface BaseRuntimeService<Type extends string> {
   get<T>(key: string): Effect.Effect<T>;
 }
 
-export interface EventRuntimeService<
-  Type extends string,
-> extends BaseRuntimeService<Type> {
+export interface FunctionExecutionContext<
+  Type extends string = string,
+> extends BaseExecutionContext<Type> {
   listen: <A, Req = never, InitReq = never>(
     effect: Effect.Effect<
       (event: any) => Effect.Effect<A, never, Req> | void,
@@ -30,9 +27,9 @@ export interface EventRuntimeService<
   run?: never;
 }
 
-export interface ProcessRuntimeService<
-  Type extends string,
-> extends BaseRuntimeService<Type> {
+export interface DaemonExecutionContext<
+  Type extends string = string,
+> extends BaseExecutionContext<Type> {
   listen?: never;
   run: <Req = never, RunReq = never>(
     effect: Effect.Effect<void, never, RunReq>,

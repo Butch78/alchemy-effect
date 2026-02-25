@@ -19,6 +19,7 @@ export interface Route<
   ID extends string = string,
   Props extends RouteProps = RouteProps,
 > extends Resource<
+  Route,
   "AWS.EC2.Route",
   ID,
   Props,

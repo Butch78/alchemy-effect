@@ -17,6 +17,7 @@ export interface NetworkAclEntry<
   ID extends string = string,
   Props extends NetworkAclEntryProps = NetworkAclEntryProps,
 > extends Resource<
+  NetworkAclEntry,
   "AWS.EC2.NetworkAclEntry",
   ID,
   Props,

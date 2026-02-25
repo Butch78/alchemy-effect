@@ -69,6 +69,17 @@ export interface PermissionAttrs {
   functionName: string;
 }
 
+export interface Permission<
+  ID extends string = string,
+  Props extends PermissionProps = PermissionProps,
+> extends Resource<
+  Permission,
+  "AWS.Lambda.Permission",
+  ID,
+  Props,
+  PermissionAttrs
+> {}
+
 /**
  * A Lambda permission that grants an AWS service or another account permission to
  * invoke a function.
@@ -80,7 +91,7 @@ export interface PermissionAttrs {
  *   action: "lambda:InvokeFunction",
  *   functionName: yield* fn.functionArn(),
  *   principal: "s3.amazonaws.com",
- *   sourceArn: yield* bucket.bucketArn(),
+ *   sourceArn: yield* bucket.bucketArn,
  *   sourceAccount: yield* Account,
  * });
  * ```
@@ -113,13 +124,3 @@ export const Permission = Resource<{
     props: Props,
   ): Effect.Effect<Permission<ID, Props>>;
 }>("AWS.Lambda.Permission");
-
-export interface Permission<
-  ID extends string = string,
-  Props extends PermissionProps = PermissionProps,
-> extends Resource<
-  "AWS.Lambda.Permission",
-  ID,
-  Props,
-  PermissionAttrs
-> {}

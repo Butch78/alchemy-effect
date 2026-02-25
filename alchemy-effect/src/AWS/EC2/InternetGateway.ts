@@ -3,7 +3,7 @@ import { Region } from "distilled-aws/Region";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
-import type { ScopedPlanStatusSession } from "../../Cli.ts";
+import type { ScopedPlanStatusSession } from "../../Cli/CLI.ts";
 import type { Input } from "../../Input.ts";
 import { Resource } from "../../Resource.ts";
 import { createInternalTags, createTagsList } from "../../Tags.ts";
@@ -23,6 +23,7 @@ export interface InternetGateway<
   ID extends string = string,
   Props extends InternetGatewayProps = InternetGatewayProps,
 > extends Resource<
+  InternetGateway,
   "AWS.EC2.InternetGateway",
   ID,
   Props,

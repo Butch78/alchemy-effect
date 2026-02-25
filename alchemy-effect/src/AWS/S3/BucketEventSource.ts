@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Binding from "../../Binding.ts";
-import { Runtime } from "../../Runtime.ts";
+import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as Lambda from "../Lambda/index.ts";
 import * as SQS from "../SQS/index.ts";
 import type { S3EventType } from "./S3Event.ts";
@@ -22,20 +22,20 @@ export class BucketEventSourceBinding extends Binding.Service(
       events?: S3EventType[];
     } = {},
   ) {
-    const runtime = yield* Runtime;
+    const ctx = yield* ExecutionContext;
 
-    if (Lambda.isFunction(runtime)) {
+    if (Lambda.isFunction(ctx)) {
       yield* Lambda.Permission("Permission", {
         action: "lambda.InvokeFunction",
-        functionName: yield* runtime.functionName(),
+        functionName: yield* ctx.functionName,
         principal: "s3.amazonaws.com",
-        sourceArn: yield* bucket.bucketArn(),
+        sourceArn: yield* bucket.bucketArn,
       });
       yield* bucket.bind({
         notificationConfiguration: {
           LambdaFunctionConfigurations: [
             {
-              LambdaFunctionArn: yield* runtime.functionArn(),
+              LambdaFunctionArn: yield* ctx.functionArn,
               Events,
             },
           ],
@@ -49,10 +49,10 @@ export class BucketEventSourceBinding extends Binding.Service(
             Sid: `AllowS3EventsFrom${bucket.id}`,
             Effect: "Allow",
             Action: ["sqs:SendMessage"],
-            Resource: [yield* q.queueArn()],
+            Resource: [yield* q.queueArn],
             Condition: {
               ArnEquals: {
-                "aws:SourceArn": yield* bucket.bucketArn(),
+                "aws:SourceArn": yield* bucket.bucketArn,
               },
             },
           },
@@ -62,7 +62,7 @@ export class BucketEventSourceBinding extends Binding.Service(
         notificationConfiguration: {
           QueueConfigurations: [
             {
-              QueueArn: yield* q.queueArn(),
+              QueueArn: yield* q.queueArn,
               Events,
             },
           ],
@@ -71,7 +71,7 @@ export class BucketEventSourceBinding extends Binding.Service(
       return q;
     } else {
       return yield* Effect.die(
-        `S3 Notifications are not supported in runtime '${runtime.type}'`,
+        `S3 Notifications are not supported in runtime '${ctx.type}'`,
       );
     }
   }),

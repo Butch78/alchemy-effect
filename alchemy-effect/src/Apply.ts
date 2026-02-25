@@ -13,7 +13,7 @@ import {
 } from "./Cli/CLI.ts";
 import type { ApplyStatus } from "./Cli/CLIEvent.ts";
 import { generateInstanceId, InstanceId } from "./InstanceId.ts";
-import * as Output from "./Output/index.ts";
+import * as Output from "./Output.ts";
 import {
   type Apply,
   type BindNode,

@@ -4,7 +4,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
-import type { ScopedPlanStatusSession } from "../../Cli.ts";
+import type { ScopedPlanStatusSession } from "../../Cli/CLI.ts";
 import type { Input } from "../../Input.ts";
 import { Resource } from "../../Resource.ts";
 import {
@@ -30,6 +30,7 @@ export interface NatGateway<
   ID extends string = string,
   Props extends NatGatewayProps = NatGatewayProps,
 > extends Resource<
+  NatGateway,
   "AWS.EC2.NatGateway",
   ID,
   Props,

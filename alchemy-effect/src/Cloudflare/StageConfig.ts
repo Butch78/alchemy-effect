@@ -1,5 +1,5 @@
 declare module "../stage.ts" {
-  interface StageConfig {
+  interface StageConfigOptions {
     cloudflare?: {
       account: string;
     };

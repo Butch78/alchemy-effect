@@ -105,10 +105,20 @@
       "bun": "./src/SQLite/index.ts",
       "import": "./lib/SQLite/index.js"
     },
+    "./Output": {
+      "types": "./src/Output.d.ts",
+      "bun": "./src/Output.ts",
+      "import": "./lib/Output.js"
+    },
     "./TUI": {
       "types": "./src/TUI/index.d.ts",
       "bun": "./src/TUI/index.ts",
       "import": "./lib/TUI/index.js"
+    },
+    "./Server": {
+      "types": "./src/Server/index.d.ts",
+      "bun": "./src/Server/index.ts",
+      "import": "./lib/Server/index.js"
     },
     "./State": {
       "types": "./src/State/index.d.ts",

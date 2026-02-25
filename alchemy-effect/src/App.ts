@@ -1,11 +1,11 @@
 import * as Layer from "effect/Layer";
 import * as ServiceMap from "effect/ServiceMap";
-import type { StageConfig } from "./Stage.ts";
+import type { StageConfigOptions } from "./Stage.ts";
 
 export interface AppProps {
   name: string;
   stage: string;
-  config: StageConfig;
+  config: StageConfigOptions;
 }
 
 export class App extends ServiceMap.Service<App, AppProps>()("App") {}

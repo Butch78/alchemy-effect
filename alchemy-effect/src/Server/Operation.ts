@@ -1,7 +1,10 @@
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { Pipeable } from "effect/Pipeable";
 import type { AnyClass } from "../Schema.ts";
+import type { Instance } from "../Util/instance.ts";
 
-export type AnyOperation = Operation<string, AnyClass, AnyClass, AnyClass>;
+export type AnyOperation = Operation<string, any, any, any>;
 
 // TODO(sam): rename to Operation?
 export interface Operation<
@@ -16,9 +19,16 @@ export interface Operation<
   output: Output;
   errors: Err[];
   new (): Operation<Name, Input, Output, Err>;
-  // handler: (
-  //   request: InstanceType<Input>,
-  // ) => Effect.Effect<InstanceType<Output>, Err, GlobalReq | MidlewareReq>;
+  layer<Self, E = never, Req = never>(
+    this: Self,
+    eff: Effect.Effect<
+      (
+        input: Instance<Input>,
+      ) => Effect.Effect<Instance<Output>, Instance<Err>>,
+      E,
+      Req
+    >,
+  ): Layer.Layer<Instance<Self>, E, Req>;
 }
 
 export interface OperationProps<

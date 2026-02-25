@@ -21,6 +21,7 @@ export interface EIP<
   ID extends string = string,
   Props extends EIPProps = EIPProps,
 > extends Resource<
+  EIP,
   "AWS.EC2.EIP",
   ID,
   Props,

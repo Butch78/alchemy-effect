@@ -2,8 +2,8 @@ import * as ec2 from "distilled-aws/ec2";
 import { Region } from "distilled-aws/Region";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import { createPhysicalName } from "../../PhysicalName.ts";
 import type { Input } from "../../Input.ts";
+import { createPhysicalName } from "../../PhysicalName.ts";
 import { Resource } from "../../Resource.ts";
 import { createInternalTags, createTagsList, diffTags } from "../../Tags.ts";
 import type { AccountID } from "../Account.ts";
@@ -22,6 +22,7 @@ export interface SecurityGroup<
   ID extends string = string,
   Props extends SecurityGroupProps = SecurityGroupProps,
 > extends Resource<
+  SecurityGroup,
   "AWS.EC2.SecurityGroup",
   ID,
   Props,

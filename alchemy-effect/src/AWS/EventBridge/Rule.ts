@@ -10,28 +10,28 @@ import { Account, type AccountID } from "../Account.ts";
 import type { RegionID } from "../Region.ts";
 
 export type {
-  InputTransformer,
-  KinesisParameters,
-  RunCommandParameters,
-  RunCommandTarget,
-  NetworkConfiguration,
+  AppSyncParameters,
+  AssignPublicIp,
   AwsVpcConfiguration,
   CapacityProviderStrategyItem,
-  PlacementConstraint,
-  PlacementStrategy,
-  SqsParameters,
   HttpParameters,
-  RedshiftDataParameters,
-  SageMakerPipelineParameters,
-  SageMakerPipelineParameter,
-  RetryPolicy,
-  AppSyncParameters,
+  InputTransformer,
+  KinesisParameters,
   LaunchType,
-  AssignPublicIp,
+  NetworkConfiguration,
+  PlacementConstraint,
   PlacementConstraintType,
+  PlacementStrategy,
   PlacementStrategyType,
   PropagateTags,
+  RedshiftDataParameters,
+  RetryPolicy,
   RuleState,
+  RunCommandParameters,
+  RunCommandTarget,
+  SageMakerPipelineParameter,
+  SageMakerPipelineParameters,
+  SqsParameters,
 } from "distilled-aws/eventbridge";
 
 export interface RuleTarget {
@@ -72,15 +72,19 @@ export interface RuleTarget {
 }
 
 /** ECS parameters for a rule target with Input-wrapped ARN fields. */
-export interface RuleTargetEcsParameters
-  extends Omit<eventbridge.EcsParameters, "TaskDefinitionArn"> {
+export interface RuleTargetEcsParameters extends Omit<
+  eventbridge.EcsParameters,
+  "TaskDefinitionArn"
+> {
   /** ARN of the ECS task definition to run. */
   TaskDefinitionArn: Input<string>;
 }
 
 /** Batch parameters for a rule target with Input-wrapped ARN fields. */
-export interface RuleTargetBatchParameters
-  extends Omit<eventbridge.BatchParameters, "JobDefinition"> {
+export interface RuleTargetBatchParameters extends Omit<
+  eventbridge.BatchParameters,
+  "JobDefinition"
+> {
   /** ARN or name of the Batch job definition. */
   JobDefinition: Input<string>;
 }
@@ -144,9 +148,7 @@ export interface RuleProps {
   tags?: Record<string, Input<string>>;
 }
 
-export interface RuleAttrs<
-  Props extends RuleProps = RuleProps,
-> {
+export interface RuleAttrs<Props extends RuleProps = RuleProps> {
   /** The name of the rule. */
   ruleName: Props["name"] extends string ? Props["name"] : string;
   /** The ARN of the rule. */
@@ -168,7 +170,7 @@ export interface RuleAttrs<
  *   },
  *   targets: [{
  *     Id: "MyTarget",
- *     Arn: yield* queue.queueArn(),
+ *     Arn: yield* queue.queueArn,
  *   }],
  * });
  * ```
@@ -194,7 +196,7 @@ export interface RuleAttrs<
  *   },
  *   targets: [{
  *     Id: "SqsTarget",
- *     Arn: yield* queue.queueArn(),
+ *     Arn: yield* queue.queueArn,
  *     InputTransformer: {
  *       InputPathsMap: {
  *         instance: "$.detail.instance-id",
@@ -214,7 +216,7 @@ export interface RuleAttrs<
  *     Id: "Target",
  *     Arn: yield* fn.functionArn(),
  *     DeadLetterConfig: {
- *       Arn: yield* dlq.queueArn(),
+ *       Arn: yield* dlq.queueArn,
  *     },
  *     RetryPolicy: {
  *       MaximumRetryAttempts: 3,
@@ -265,57 +267,21 @@ export interface Rule<
   RuleAttrs<Input.Resolve<Props>>
 > {}
 
-const toTarget = (target: Input.Resolve<RuleTarget>): eventbridge.Target => ({
-  Id: target.Id,
-  Arn: target.Arn,
-  RoleArn: target.RoleArn,
-  Input: target.Input,
-  InputPath: target.InputPath,
-  InputTransformer: target.InputTransformer,
-  KinesisParameters: target.KinesisParameters,
-  RunCommandParameters: target.RunCommandParameters,
-  EcsParameters: target.EcsParameters
-    ? {
-        ...target.EcsParameters,
-        TaskDefinitionArn: target.EcsParameters.TaskDefinitionArn,
-      }
-    : undefined,
-  BatchParameters: target.BatchParameters
-    ? {
-        ...target.BatchParameters,
-        JobDefinition: target.BatchParameters.JobDefinition,
-      }
-    : undefined,
-  SqsParameters: target.SqsParameters,
-  HttpParameters: target.HttpParameters,
-  RedshiftDataParameters: target.RedshiftDataParameters,
-  SageMakerPipelineParameters: target.SageMakerPipelineParameters,
-  DeadLetterConfig: target.DeadLetterConfig
-    ? { Arn: target.DeadLetterConfig.Arn }
-    : undefined,
-  RetryPolicy: target.RetryPolicy,
-  AppSyncParameters: target.AppSyncParameters,
-});
-
 export const RuleProvider = () =>
   Rule.provider.effect(
     Effect.gen(function* () {
       const region = yield* Region;
       const accountId = yield* Account;
 
-      const createRuleName = (
-        id: string,
-        props: { name?: string },
-      ) =>
-        Effect.gen(function* () {
-          if (props.name) {
-            return props.name;
-          }
-          return yield* createPhysicalName({
-            id,
-            maxLength: 64,
-          });
+      const createRuleName = (id: string, props: { name?: string }) => {
+        if (props.name) {
+          return Effect.succeed(props.name);
+        }
+        return createPhysicalName({
+          id,
+          maxLength: 64,
         });
+      };
 
       return {
         stables: ["ruleName", "ruleArn", "eventBusName"],
@@ -334,8 +300,12 @@ export const RuleProvider = () =>
         create: Effect.fn(function* ({ id, news, session }) {
           const ruleName = yield* createRuleName(id, news);
           const internalTags = yield* createInternalTags(id);
-          const allTags = { ...internalTags, ...(news.tags as Record<string, string> | undefined) };
-          const eventBusName = (news.eventBusName as string | undefined) ?? "default";
+          const allTags = {
+            ...internalTags,
+            ...(news.tags as Record<string, string> | undefined),
+          };
+          const eventBusName =
+            (news.eventBusName as string | undefined) ?? "default";
 
           const { RuleArn } = yield* eventbridge.putRule({
             Name: ruleName,
@@ -350,11 +320,13 @@ export const RuleProvider = () =>
             Tags: createTagsList(allTags),
           });
 
-          const resolvedTargets = (news.targets as Input.Resolve<RuleTarget>[] | undefined) ?? [];
+          const resolvedTargets =
+            (news.targets as Input.Resolve<RuleTarget>[] | undefined) ?? [];
           if (resolvedTargets.length > 0) {
             yield* eventbridge.putTargets({
               Rule: ruleName,
-              EventBusName: eventBusName !== "default" ? eventBusName : undefined,
+              EventBusName:
+                eventBusName !== "default" ? eventBusName : undefined,
               Targets: resolvedTargets.map(toTarget),
             });
           }
@@ -366,14 +338,16 @@ export const RuleProvider = () =>
 
           return {
             ruleName,
-            ruleArn: ruleArn as `arn:aws:events:${RegionID}:${AccountID}:rule/${string}`,
+            ruleArn:
+              ruleArn as `arn:aws:events:${RegionID}:${AccountID}:rule/${string}`,
             eventBusName,
           };
         }),
         update: Effect.fn(function* ({ id, news, olds, output, session }) {
           const ruleName = output.ruleName;
           const eventBusName = output.eventBusName;
-          const eventBusParam = eventBusName !== "default" ? eventBusName : undefined;
+          const eventBusParam =
+            eventBusName !== "default" ? eventBusName : undefined;
 
           yield* eventbridge.putRule({
             Name: ruleName,
@@ -388,12 +362,18 @@ export const RuleProvider = () =>
           });
 
           const oldTargetIds = new Set(
-            ((olds.targets as Input.Resolve<RuleTarget>[] | undefined) ?? []).map((t) => t.Id),
+            (
+              (olds.targets as Input.Resolve<RuleTarget>[] | undefined) ?? []
+            ).map((t) => t.Id),
           );
           const newTargetIds = new Set(
-            ((news.targets as Input.Resolve<RuleTarget>[] | undefined) ?? []).map((t) => t.Id),
+            (
+              (news.targets as Input.Resolve<RuleTarget>[] | undefined) ?? []
+            ).map((t) => t.Id),
           );
-          const removedIds = [...oldTargetIds].filter((id) => !newTargetIds.has(id));
+          const removedIds = [...oldTargetIds].filter(
+            (id) => !newTargetIds.has(id),
+          );
 
           if (removedIds.length > 0) {
             yield* eventbridge.removeTargets({
@@ -403,7 +383,8 @@ export const RuleProvider = () =>
             });
           }
 
-          const resolvedTargets = (news.targets as Input.Resolve<RuleTarget>[] | undefined) ?? [];
+          const resolvedTargets =
+            (news.targets as Input.Resolve<RuleTarget>[] | undefined) ?? [];
           if (resolvedTargets.length > 0) {
             yield* eventbridge.putTargets({
               Rule: ruleName,
@@ -413,8 +394,14 @@ export const RuleProvider = () =>
           }
 
           const internalTags = yield* createInternalTags(id);
-          const oldTags = { ...internalTags, ...(olds.tags as Record<string, string> | undefined) };
-          const newTags = { ...internalTags, ...(news.tags as Record<string, string> | undefined) };
+          const oldTags = {
+            ...internalTags,
+            ...(olds.tags as Record<string, string> | undefined),
+          };
+          const newTags = {
+            ...internalTags,
+            ...(news.tags as Record<string, string> | undefined),
+          };
           const { removed, upsert } = diffTags(oldTags, newTags);
 
           if (removed.length > 0) {
@@ -437,7 +424,8 @@ export const RuleProvider = () =>
         delete: Effect.fn(function* (input) {
           const ruleName = input.output.ruleName;
           const eventBusName = input.output.eventBusName;
-          const eventBusParam = eventBusName !== "default" ? eventBusName : undefined;
+          const eventBusParam =
+            eventBusName !== "default" ? eventBusName : undefined;
 
           const { Targets } = yield* eventbridge
             .listTargetsByRule({
@@ -474,3 +462,35 @@ export const RuleProvider = () =>
       };
     }),
   );
+
+const toTarget = (target: Input.Resolve<RuleTarget>): eventbridge.Target => ({
+  Id: target.Id,
+  Arn: target.Arn,
+  RoleArn: target.RoleArn,
+  Input: target.Input,
+  InputPath: target.InputPath,
+  InputTransformer: target.InputTransformer,
+  KinesisParameters: target.KinesisParameters,
+  RunCommandParameters: target.RunCommandParameters,
+  EcsParameters: target.EcsParameters
+    ? {
+        ...target.EcsParameters,
+        TaskDefinitionArn: target.EcsParameters.TaskDefinitionArn,
+      }
+    : undefined,
+  BatchParameters: target.BatchParameters
+    ? {
+        ...target.BatchParameters,
+        JobDefinition: target.BatchParameters.JobDefinition,
+      }
+    : undefined,
+  SqsParameters: target.SqsParameters,
+  HttpParameters: target.HttpParameters,
+  RedshiftDataParameters: target.RedshiftDataParameters,
+  SageMakerPipelineParameters: target.SageMakerPipelineParameters,
+  DeadLetterConfig: target.DeadLetterConfig
+    ? { Arn: target.DeadLetterConfig.Arn }
+    : undefined,
+  RetryPolicy: target.RetryPolicy,
+  AppSyncParameters: target.AppSyncParameters,
+});

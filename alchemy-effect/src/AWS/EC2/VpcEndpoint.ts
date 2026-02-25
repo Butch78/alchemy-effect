@@ -5,7 +5,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
-import type { ScopedPlanStatusSession } from "../../Cli.ts";
+import type { ScopedPlanStatusSession } from "../../Cli/CLI.ts";
 import type { Input } from "../../Input.ts";
 import { Resource } from "../../Resource.ts";
 import { createInternalTags, createTagsList, diffTags } from "../../Tags.ts";
@@ -28,6 +28,7 @@ export interface VpcEndpoint<
   ID extends string = string,
   Props extends VpcEndpointProps = VpcEndpointProps,
 > extends Resource<
+  VpcEndpoint,
   "AWS.EC2.VpcEndpoint",
   ID,
   Props,

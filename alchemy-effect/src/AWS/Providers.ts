@@ -1,3 +1,4 @@
+import { pipe } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as ESBuild from "../Bundle/ESBuild.ts";
 import * as Account from "./Account.ts";
@@ -17,18 +18,28 @@ import * as SQS from "./SQS/index.ts";
  * If the assets bucket exists (created via `alchemy-effect bootstrap`),
  * Lambda functions will use S3 for code deployment instead of inline ZipFile.
  */
-export const Providers = () =>
-  bareProviders().pipe(
+export const providers = () =>
+  pipe(
+    resources(),
+    Layer.provideMerge(bindings()),
+    Layer.provideMerge(utils()),
     Layer.provideMerge(Assets.AssetsProvider()),
     Layer.provideMerge(Account.fromStageConfig()),
     Layer.provideMerge(Region.fromStageConfig()),
     Layer.provideMerge(Credentials.fromStageConfig()),
     Layer.provideMerge(Endpoint.fromStageConfig()),
+    Layer.orDie,
   );
 
-export default Providers();
+export const credentials = () =>
+  pipe(
+    Account.fromStageConfig(),
+    Layer.provideMerge(Region.fromStageConfig()),
+    Layer.provideMerge(Credentials.fromStageConfig()),
+    Layer.provideMerge(Endpoint.fromStageConfig()),
+  );
 
-export const Resources = () =>
+export const resources = () =>
   Layer.mergeAll(
     DynamoDB.TableProvider(),
     EC2.EgressOnlyInternetGatewayProvider(),
@@ -52,7 +63,7 @@ export const Resources = () =>
     SQS.QueueProvider(),
   );
 
-export const Bindings = () =>
+export const bindings = () =>
   Layer.mergeAll(
     DynamoDB.GetItemBinding.layer(),
     Kinesis.PutRecordBinding.layer(),
@@ -75,17 +86,4 @@ export const Bindings = () =>
     SQS.QueueEventSourceBinding.layer(),
   );
 
-export const StageConfigLayer = <L extends Layer.Layer<any, any, any>>(
-  layer: L,
-) =>
-  layer.pipe(
-    Layer.provideMerge(Account.fromStageConfig()),
-    Layer.provideMerge(Region.fromStageConfig()),
-    Layer.provideMerge(Credentials.fromStageConfig()),
-    Layer.provideMerge(Endpoint.fromStageConfig()),
-  );
-
 const utils = () => Layer.mergeAll(ESBuild.esBuild());
-
-const bareProviders = () =>
-  Resources().pipe(Layer.provideMerge(Bindings()), Layer.provideMerge(utils()));

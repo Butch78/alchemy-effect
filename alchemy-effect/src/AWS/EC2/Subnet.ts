@@ -3,7 +3,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
-import type { ScopedPlanStatusSession } from "../../Cli.ts";
+import type { ScopedPlanStatusSession } from "../../Cli/CLI.ts";
 import { somePropsAreDifferent } from "../../Diff.ts";
 import type { Input } from "../../Input.ts";
 import { Resource } from "../../Resource.ts";
@@ -27,6 +27,7 @@ export interface Subnet<
   ID extends string = string,
   Props extends SubnetProps = SubnetProps,
 > extends Resource<
+  Subnet,
   "AWS.EC2.Subnet",
   ID,
   Props,

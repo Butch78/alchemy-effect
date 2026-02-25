@@ -70,6 +70,7 @@ export interface Queue<
   ID extends string = string,
   Props extends QueueProps = QueueProps,
 > extends Resource<
+  Queue,
   "AWS.SQS.Queue",
   ID,
   Props,

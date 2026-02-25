@@ -17,6 +17,7 @@ export interface NetworkAclAssociation<
   ID extends string = string,
   Props extends NetworkAclAssociationProps = NetworkAclAssociationProps,
 > extends Resource<
+  NetworkAclAssociation,
   "AWS.EC2.NetworkAclAssociation",
   ID,
   Props,

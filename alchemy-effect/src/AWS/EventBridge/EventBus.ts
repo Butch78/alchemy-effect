@@ -14,7 +14,11 @@ import {
 import { Account, type AccountID } from "../Account.ts";
 import type { RegionID } from "../Region.ts";
 
-export type { LogConfig, IncludeDetail, Level } from "distilled-aws/eventbridge";
+export type {
+  IncludeDetail,
+  Level,
+  LogConfig,
+} from "distilled-aws/eventbridge";
 
 export interface EventBusDeadLetterConfig {
   /** ARN of the SQS queue used as the dead-letter queue. */
@@ -62,9 +66,7 @@ export interface EventBusProps {
   tags?: Record<string, Input<string>>;
 }
 
-export interface EventBusAttrs<
-  Props extends EventBusProps = EventBusProps,
-> {
+export interface EventBusAttrs<Props extends EventBusProps = EventBusProps> {
   /** The name of the event bus. */
   eventBusName: Props["name"] extends string ? Props["name"] : string;
   /** The ARN of the event bus. */
@@ -88,7 +90,7 @@ export interface EventBusAttrs<
  * ```typescript
  * const bus = yield* EventBus("ReliableBus", {
  *   deadLetterConfig: {
- *     Arn: yield* dlq.queueArn(),
+ *     Arn: yield* dlq.queueArn,
  *   },
  * });
  * ```
@@ -111,6 +113,7 @@ export interface EventBus<
   ID extends string = string,
   Props extends EventBusProps = EventBusProps,
 > extends Resource<
+  EventBus,
   "AWS.EventBridge.EventBus",
   ID,
   Props,
@@ -123,10 +126,7 @@ export const EventBusProvider = () =>
       const region = yield* Region;
       const accountId = yield* Account;
 
-      const createEventBusName = (
-        id: string,
-        props: { name?: string },
-      ) =>
+      const createEventBusName = (id: string, props: { name?: string }) =>
         Effect.gen(function* () {
           if (props.name) {
             return props.name;
@@ -152,7 +152,10 @@ export const EventBusProvider = () =>
         create: Effect.fn(function* ({ id, news, session }) {
           const eventBusName = yield* createEventBusName(id, news);
           const internalTags = yield* createInternalTags(id);
-          const allTags = { ...internalTags, ...(news.tags as Record<string, string> | undefined) };
+          const allTags = {
+            ...internalTags,
+            ...(news.tags as Record<string, string> | undefined),
+          };
 
           const eventBusArn =
             `arn:aws:events:${region}:${accountId}:event-bus/${eventBusName}` as const;
@@ -208,8 +211,14 @@ export const EventBusProvider = () =>
           });
 
           const internalTags = yield* createInternalTags(id);
-          const oldTags = { ...internalTags, ...(olds.tags as Record<string, string> | undefined) };
-          const newTags = { ...internalTags, ...(news.tags as Record<string, string> | undefined) };
+          const oldTags = {
+            ...internalTags,
+            ...(olds.tags as Record<string, string> | undefined),
+          };
+          const newTags = {
+            ...internalTags,
+            ...(news.tags as Record<string, string> | undefined),
+          };
           const { removed, upsert } = diffTags(oldTags, newTags);
 
           if (removed.length > 0) {

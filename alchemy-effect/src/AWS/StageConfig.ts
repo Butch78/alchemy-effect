@@ -11,7 +11,7 @@ export interface AwsStageConfig {
 }
 
 declare module "../Stage.ts" {
-  interface StageConfig {
+  interface StageConfigOptions {
     aws?: AwsStageConfig;
   }
 }

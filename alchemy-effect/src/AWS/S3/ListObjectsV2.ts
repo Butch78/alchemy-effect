@@ -1,8 +1,8 @@
 import * as S3 from "distilled-aws/s3";
 import * as Effect from "effect/Effect";
 import * as Binding from "../../Binding.ts";
-import * as Output from "../../Output/index.ts";
-import { Runtime } from "../../Runtime.ts";
+import { ExecutionContext } from "../../ExecutionContext.ts";
+import * as Output from "../../Output.ts";
 import * as AWS from "../index.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Bucket } from "./Bucket.ts";
@@ -14,7 +14,7 @@ export interface ListObjectsV2Request extends Omit<
 
 export const ListObjectsV2 = Effect.fn(function* <B extends Bucket>(bucket: B) {
   yield* bindListObjectsV2(bucket);
-  const BucketName = yield* bucket.bucketName();
+  const BucketName = yield* bucket.bucketName;
   return yield* AWS.withContext(
     Effect.fn(function* (request?: ListObjectsV2Request) {
       return yield* S3.listObjectsV2({
@@ -32,21 +32,22 @@ export const bindListObjectsV2 = Binding.fn<ListObjectsV2Binding>(
 export class ListObjectsV2Binding extends Binding.Service(
   "AWS.S3.ListObjectsV2",
   Effect.fn(function* <B extends Bucket>(bucket: B) {
-    const runtime = yield* Runtime;
-    if (Lambda.isFunction(runtime)) {
-      yield* runtime.bind({
+    const ctx = yield* ExecutionContext;
+    if (Lambda.isFunction(ctx)) {
+      yield* ctx.bind({
         policyStatements: [
           {
             Sid: "ListObjectsV2",
             Effect: "Allow",
             Action: ["s3:ListBucket"],
-            Resource: [Output.interpolate`${bucket.bucketArn()}`],
+            Resource: [Output.interpolate`${bucket.bucketArn}`],
           },
         ],
       });
+    } else {
+      return yield* Effect.die(
+        `ListObjectsV2Binding does not support runtime '${ctx.type}'`,
+      );
     }
-    return yield* Effect.die(
-      `ListObjectsV2Binding does not support runtime '${runtime.type}'`,
-    );
   }),
 ) {}

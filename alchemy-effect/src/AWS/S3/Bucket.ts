@@ -5,9 +5,10 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import type { Input } from "../../Input.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource } from "../../Resource.ts";
+import type { Provider } from "../../Provider.ts";
+import { Resource, type ResourceEffect } from "../../Resource.ts";
 import { diffTags } from "../../Tags.ts";
-import { type AccountID, Account } from "../Account.ts";
+import { Account, type AccountID } from "../Account.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import type { RegionID } from "../Region.ts";
 
@@ -34,6 +35,11 @@ export interface BucketProps {
    * Tags to apply to the bucket.
    */
   tags?: Record<string, Input<string>>;
+}
+
+export interface BucketBinding {
+  notificationConfiguration?: s3.NotificationConfiguration;
+  policyStatements?: PolicyStatement[];
 }
 
 export interface BucketAttrs<Props extends Input.Resolve<BucketProps>> {
@@ -63,25 +69,25 @@ export interface BucketAttrs<Props extends Input.Resolve<BucketProps>> {
   accountId: AccountID;
 }
 
+export type BucketProvider = Provider<Bucket>;
+
 export const Bucket = Resource<{
   <const ID extends string, const Props extends BucketProps>(
     id: ID,
     props?: Props,
-  ): Effect.Effect<Bucket<ID, Props>>;
+  ): ResourceEffect<Bucket<ID, Props>>;
 }>("AWS.S3.Bucket");
 
 export interface Bucket<
   ID extends string = string,
   Props extends BucketProps = BucketProps,
 > extends Resource<
+  Bucket,
   "AWS.S3.Bucket",
   ID,
   Props,
   BucketAttrs<Input.Resolve<Props>>,
-  {
-    notificationConfiguration?: s3.NotificationConfiguration;
-    policyStatements?: PolicyStatement[];
-  }
+  BucketBinding
 > {}
 
 export const BucketProvider = () =>

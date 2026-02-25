@@ -1,10 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ServiceMap from "effect/ServiceMap";
+import { Plantime } from "./ExecutionContext.ts";
 import type { Input } from "./Input.ts";
 import { Phase } from "./Phase.ts";
 import type { ResourceClass, ResourceLike } from "./Resource.ts";
-import { Runtime } from "./Runtime.ts";
 import type { Instance } from "./Util/instance.ts";
 
 export interface Binding<
@@ -42,46 +42,46 @@ export const effect = <
   [resource, binding]: [R, B],
   impl: NoInfer<
     (
-      self: ResourceClass.Instance<R>,
+      self: ResourceClass.ResourceInstance<R>,
       binding: B["resource"],
       props: B["props"],
     ) => Effect.Effect<
       {
-        [prop in keyof R["fn"]]?: Input<R["fn"][prop]>;
+        [prop in keyof R["ctor"]]?: Input<R["ctor"][prop]>;
       },
       Err,
       Req
     >
   >,
-): Layer.Layer<[ResourceClass.Instance<R>, B["resource"]], Err, Req> =>
+): Layer.Layer<[ResourceClass.ResourceInstance<R>, B["resource"]], Err, Req> =>
   Layer.succeed(BindingService(resource, binding), impl);
 
 export const succeed = <R extends ResourceClass, B extends Binding>(
   [resource, binding]: [R, B],
   impl: NoInfer<
     (
-      self: ResourceClass.Instance<R>,
+      self: ResourceClass.ResourceInstance<R>,
       binding: B["resource"],
       props: B["props"],
       // ...props: never extends B["props"] ? [] : [props: B["props"]]
     ) => {
-      [prop in keyof R["fn"]]?: Input<R["fn"][prop]>;
+      [prop in keyof R["ctor"]]?: Input<R["ctor"][prop]>;
     }
   >,
-): Layer.Layer<[ResourceClass.Instance<R>, B["resource"]]> =>
+): Layer.Layer<[ResourceClass.ResourceInstance<R>, B["resource"]]> =>
   Layer.succeed(BindingService(resource, binding), impl);
 
 const BindingService = <R extends ResourceClass, B extends Binding>(
   resource: R,
   binding: B,
 ) =>
-  ServiceMap.Service<[ResourceClass.Instance<R>, B["resource"]], any>()(
+  ServiceMap.Service<[ResourceClass.ResourceInstance<R>, B["resource"]], any>()(
     `${resource.type}(${binding.tag})`,
   );
 
 export type BindingFn<Req = never> = (
   ...args: any[]
-) => Effect.Effect<void, never, Req | Runtime>;
+) => Effect.Effect<void, never, Req | Plantime>;
 
 export interface BindingTag<
   Tag extends string,
@@ -98,14 +98,12 @@ export interface BindingTag<
 
 export const fn = <B extends BindingTag<any, any, any>>(
   tag: B["tag"],
-): ((
-  ...args: Parameters<B["fn"]>
-) => Effect.Effect<void, never, B | B["Req"]>) =>
+): ((...args: Parameters<B["fn"]>) => Effect.Effect<void, never, B["Req"]>) =>
   Effect.fn(function* () {
     if ((yield* Phase) === "plan") {
       return yield* Service(tag).service();
     } else {
-      return (yield* Runtime).get(tag);
+      return (yield* Plantime).get(tag);
     }
   }) as (
     ...args: Parameters<B["fn"]>

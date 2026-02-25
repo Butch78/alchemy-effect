@@ -22,6 +22,7 @@ export interface EgressOnlyInternetGateway<
   ID extends string = string,
   Props extends EgressOnlyInternetGatewayProps = EgressOnlyInternetGatewayProps,
 > extends Resource<
+  EgressOnlyInternetGateway,
   "AWS.EC2.EgressOnlyInternetGateway",
   ID,
   Props,

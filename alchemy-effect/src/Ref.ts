@@ -1,4 +1,4 @@
-import * as Output from "./Output/index.ts";
+import * as Output from "./Output.ts";
 import type { AnyResource, Resource } from "./Resource.ts";
 
 // special runtime-only symbol for probing the Ref proxy for its metadata

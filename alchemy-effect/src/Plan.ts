@@ -6,19 +6,12 @@ import { omit } from "effect/Struct";
 import type { Instance } from ".//Util/instance.ts";
 import { asEffect } from ".//Util/types.ts";
 import { App } from "./App.ts";
-import type {
-  AnyBinding,
-  BindingDiffProps,
-  BindingProvider,
-} from "./Binding.ts";
-import type { Capability } from "./Capability.ts";
-import type { Diff, NoopDiff, UpdateDiff } from "./Diff.ts";
+import type { NoopDiff, UpdateDiff } from "./Diff.ts";
 import { InstanceId } from "./InstanceId.ts";
-import * as Output from "./Output/index.ts";
+import * as Output from "./Output.ts";
 import type { Provider } from "./Provider.ts";
 import { getProviderByType, type ProviderService } from "./Provider.ts";
-import type { AnyResource, Resource, ResourceTags } from "./Resource.ts";
-import { isService, type IService, type Service } from "./Service.ts";
+import type { Resource, ResourceLike } from "./Resource.ts";
 import {
   State,
   StateStoreError,
@@ -32,51 +25,6 @@ import {
 } from "./State/index.ts";
 
 export type PlanError = never;
-
-export const isBindNode = (node: any): node is BindNode => {
-  return (
-    node &&
-    typeof node === "object" &&
-    (node.action === "attach" ||
-      node.action === "detach" ||
-      node.action === "noop")
-  );
-};
-
-/**
- * A node in the plan that represents a binding operation acting on a resource.
- */
-export type BindNode<B extends AnyBinding = AnyBinding> =
-  | Attach<B>
-  | Reattach<B>
-  | Detach<B>
-  | NoopBind<B>;
-
-export type Attach<B extends AnyBinding = AnyBinding> = {
-  action: "attach";
-  binding: B;
-  olds: BindNode | undefined;
-  attr: B["attr"] | undefined;
-};
-
-export type Reattach<B extends AnyBinding = AnyBinding> = {
-  action: "reattach";
-  binding: B;
-  olds: BindNode;
-  attr: B["attr"];
-};
-
-export type Detach<B extends AnyBinding = AnyBinding> = {
-  action: "detach";
-  binding: B;
-  attr: B["attr"] | undefined;
-};
-
-export type NoopBind<B extends AnyBinding = AnyBinding> = {
-  action: "noop";
-  binding: B;
-  attr: B["attr"];
-};
 
 export const isCRUD = (node: any): node is CRUD => {
   return (
@@ -92,35 +40,39 @@ export const isCRUD = (node: any): node is CRUD => {
 /**
  * A node in the plan that represents a resource CRUD operation.
  */
-export type CRUD<R extends Resource = AnyResource> =
+export type CRUD<R extends ResourceLike = any> =
   | Create<R>
   | Update<R>
   | Delete<R>
   | Replace<R>
   | NoopUpdate<R>;
 
-export type Apply<R extends Resource = AnyResource> =
+export type Apply<R extends ResourceLike = any> =
   | Create<R>
   | Update<R>
   | Replace<R>
   | NoopUpdate<R>;
 
-export interface BaseNode<R extends Resource = AnyResource> {
+export interface BaseNode<R extends ResourceLike = ResourceLike> {
   resource: R;
   provider: ProviderService<R>;
-  bindings: BindNode[];
   downstream: string[];
 }
 
-export interface Create<R extends Resource = AnyResource> extends BaseNode<R> {
+export interface Create<
+  R extends ResourceLike = ResourceLike,
+> extends BaseNode<R> {
   action: "create";
-  props: any;
+  props: R["props"];
+  bindings: R["binding"][];
   state: CreatingResourceState | undefined;
 }
 
-export interface Update<R extends Resource = AnyResource> extends BaseNode<R> {
+export interface Update<
+  R extends ResourceLike = ResourceLike,
+> extends BaseNode<R> {
   action: "update";
-  props: any;
+  props: R["props"];
   state:
     | CreatedResourceState
     | UpdatedResourceState
@@ -130,20 +82,24 @@ export interface Update<R extends Resource = AnyResource> extends BaseNode<R> {
     | ReplacedResourceState;
 }
 
-export interface Delete<R extends Resource = AnyResource> extends BaseNode<R> {
+export interface Delete<
+  R extends ResourceLike = ResourceLike,
+> extends BaseNode<R> {
   action: "delete";
   // a resource can be deleted no matter what state it's in
   state: ResourceState;
 }
 
 export interface NoopUpdate<
-  R extends Resource = AnyResource,
+  R extends ResourceLike = ResourceLike,
 > extends BaseNode<R> {
   action: "noop";
   state: CreatedResourceState | UpdatedResourceState;
 }
 
-export interface Replace<R extends Resource = AnyResource> extends BaseNode<R> {
+export interface Replace<
+  R extends ResourceLike = ResourceLike,
+> extends BaseNode<R> {
   action: "replace";
   props: any;
   deleteFirst: boolean;
@@ -156,87 +112,16 @@ export interface Replace<R extends Resource = AnyResource> extends BaseNode<R> {
     | ReplacedResourceState;
 }
 
-export type ResourceGraph<Resources extends Service | Resource> = ToGraph<
+export type ResourceGraph<Resources extends ResourceLike> = ToGraph<
   TraverseResources<Resources>
 >;
 
-export type TraverseResources<Resources extends Service | Resource> =
-  | Resources
-  | BoundResources<Resources>
-  | TransitiveResources<Resources>;
-
-type ToGraph<Resources extends Service | Resource> = {
-  [ID in Resources["id"]]: Apply<Extract<Resources, { id: ID }>>;
-};
-
-export type BoundResources<Resources extends Service | Resource> = NeverUnknown<
-  Extract<
-    Resources,
-    IService
-  >["props"]["bindings"]["capabilities"][number]["resource"]
->;
-
-// finds transitive dependencies at most two levels deep
-// TODO(sam): figure out an efficient way to do arbitrary depth
-export type TransitiveResources<
-  Resources extends Service | Resource,
-  Found extends Service | Resource = never,
-> = Extract<
-  | Found
-  | {
-      [prop in keyof Resources["props"]]: IsAny<
-        Resources["props"][prop]
-      > extends true
-        ? Found
-        : Resources["props"][prop] extends { kind: "alchemy/Policy" }
-          ? Found
-          : Resources["props"][prop] extends Output.Output<any, infer Src, any>
-            ? Src extends Found
-              ? Found
-              : TransitiveResources<Src, Src | Found>
-            : {
-                [p in keyof Resources["props"][prop]]: IsAny<
-                  Resources["props"][prop][p]
-                > extends true
-                  ? Found
-                  : Resources["props"][prop][p] extends Output.Output<
-                        any,
-                        infer Src,
-                        any
-                      >
-                    ? Src extends Found
-                      ? Found
-                      : string extends Src["id"]
-                        ? Found
-                        : TransitiveResources<Src, Src | Found>
-                    : Found;
-              }[keyof Resources["props"][prop]];
-    }[keyof Resources["props"]],
-  Service | Resource
->;
-
-export type Providers<Resources extends Service | Resource> =
-  | ResourceProviders<Resources>
-  | BindingTags<Resources>;
-
-export type ResourceProviders<Res extends Service | Resource> = Res extends any
-  ? Provider<Extract<Res["base"], Service | Resource>>
-  : never;
-
-export type BindingTags<Resources extends Service | Resource> = NeverUnknown<
-  Extract<Resources, Service>["props"]["bindings"]["tags"][number]
->;
-
-type NeverUnknown<T> = unknown extends T ? never : T;
-
-type IsAny<T> = 0 extends 1 & T ? true : false;
-
-export type DerivePlan<Resources extends Service | Resource> = {
+export type DerivePlan<Resources extends ResourceLike> = {
   resources: {
     [ID in keyof ResourceGraph<Resources>]: ResourceGraph<Resources>[ID];
   };
   deletions: {
-    [ID in string]: Delete<AnyResource>;
+    [ID in string]: Delete<Resource>;
   };
 };
 
@@ -249,31 +134,28 @@ export type IPlan = {
   };
 };
 
-export type Plan<Resources extends Service | Resource> = Effect.Effect<
+export type Plan<Resources extends ResourceLike> = Effect.Effect<
   DerivePlan<Resources>,
   | CannotReplacePartiallyReplacedResource
   | DeleteResourceHasDownstreamDependencies,
   Providers<Resources> | State
 >;
 
-export const plan = <const Resources extends (Service | Resource)[]>(
+export const plan = <const Resources extends Resource[]>(
   ..._resources: Resources
 ): Plan<Instance<Resources[number]>> =>
   Effect.gen(function* () {
     const state = yield* State;
 
     const findResources = (
-      resource: Service | Resource,
+      resource: Resource,
       visited: Set<string>,
-    ): (Service | Resource)[] => {
+    ): Resource[] => {
       if (visited.has(resource.id)) {
         return [];
       }
       visited.add(resource.id);
-      const upstream = Object.values(Output.upstreamAny(resource.props)) as (
-        | Service
-        | Resource
-      )[];
+      const upstream = Object.values(Output.upstreamAny(resource.props));
       return [
         resource,
         ...upstream,
@@ -521,23 +403,7 @@ export const plan = <const Resources extends (Service | Resource)[]>(
 
               const downstream = newDownstreamDependencies[id] ?? [];
 
-              const bindings = isService(node)
-                ? yield* diffBindings({
-                    oldState,
-                    bindings: (
-                      node.props.bindings as unknown as {
-                        bindings: AnyBinding[];
-                      }
-                    ).bindings,
-                    target: {
-                      id: node.id,
-                      props: node.props,
-                      // TODO(sam): pick the right ones based on old status
-                      oldAttr: oldState?.attr,
-                      oldProps: oldState?.props,
-                    },
-                  })
-                : []; // TODO(sam): return undefined instead of empty array
+              const bindings = undefined!;
 
               const Node = <T extends Apply>(
                 node: Omit<
@@ -876,7 +742,7 @@ export class DeleteResourceHasDownstreamDependencies extends Data.TaggedError(
   dependencies: string[];
 }> {}
 
-const arePropsChanged = <R extends Resource>(
+const arePropsChanged = <R extends ResourceLike>(
   oldProps: R["props"] | undefined,
   newProps: R["props"],
 ) => {
@@ -887,147 +753,6 @@ const arePropsChanged = <R extends Resource>(
   );
 };
 
-const diffBindings = Effect.fn(function* ({
-  oldState,
-  bindings,
-  target,
-}: {
-  oldState: ResourceState | undefined;
-  bindings: AnyBinding[];
-  target: BindingDiffProps["target"];
-}) {
-  // const actions: BindNode[] = [];
-  const oldBindings = oldState?.bindings;
-  // const oldSids = new Set(
-  //   oldBindings?.map(({ binding }) => binding.capability.sid),
-  // );
-
-  const diffBinding: (
-    binding: AnyBinding,
-  ) => Effect.Effect<BindNode, StateStoreError, State> = Effect.fn(
-    function* (binding) {
-      const cap = binding.capability;
-      const sid = cap.sid ?? `${cap.action}:${cap.resource.ID}`;
-      // Find potential oldBinding for this sid
-      const oldBinding = oldBindings?.find(
-        ({ binding }) => binding.capability.sid === sid,
-      );
-      if (!oldBinding) {
-        return {
-          action: "attach",
-          binding,
-          attr: undefined,
-          olds: undefined,
-        } satisfies Attach<AnyBinding>;
-      }
-
-      const diff = yield* isBindingDiff({
-        target,
-        oldBinding,
-        newBinding: binding,
-      });
-      // if (diff === false) {
-      // } else if (diff === true) {
-      //   return {
-      //     action: "attach",
-      //     binding,
-      //     olds: oldBinding,
-      //   } satisfies Attach<AnyBinding>;
-      // }
-      if (diff.action === "replace") {
-        return yield* Effect.die(
-          new Error("Replace binding not yet supported"),
-        );
-        // TODO(sam): implement support for replacing bindings
-        // return {
-        //   action: "replace",
-        //   binding,
-        //   olds: oldBinding,
-        // };
-      } else if (diff?.action === "update") {
-        return {
-          action: "reattach",
-          binding,
-          olds: oldBinding,
-          attr: oldBinding.attr,
-        } satisfies Reattach<AnyBinding>;
-      }
-      return {
-        action: "noop",
-        binding,
-        attr: oldBinding.attr,
-      } satisfies NoopBind<AnyBinding>;
-    },
-  );
-
-  return (yield* Effect.all(bindings.map(diffBinding), {
-    concurrency: "unbounded",
-  })).filter((action): action is BindNode => action !== null);
-});
-
-const isBindingDiff = Effect.fn(function* ({
-  target,
-  oldBinding: { binding: oldBinding },
-  newBinding,
-}: {
-  // TODO(sam): support binding to other Resources
-  target: BindingDiffProps["target"];
-  oldBinding: BindNode;
-  newBinding: AnyBinding;
-}) {
-  const oldCap = oldBinding.capability;
-  const newCap = newBinding.capability;
-  if (
-    // if the binding provider has changed
-    oldBinding.tag !== newBinding.tag ||
-    // if it points to a totally different resource, we should replace
-    oldCap?.resource?.id !== newCap?.resource?.id ||
-    // if it is a different action
-    oldCap.action !== newCap.action
-  ) {
-    // then we must replace (we need to detach and attach with different bindings or to different resources)
-    return {
-      action: "replace",
-    } satisfies Diff;
-  }
-
-  const binding = newBinding as AnyBinding & {
-    // smuggled property (because it interacts poorly with inference)
-    Tag: Context.Tag<never, BindingProvider>;
-  };
-  const provider = yield* binding.Tag;
-  if (provider.diff) {
-    const state = yield* State;
-    const oldState = yield* state.get(oldCap.resource.id);
-    if (oldState) {
-      const diff = yield* provider
-        .diff({
-          source: {
-            id: oldCap.resource.id,
-            props: newCap.resource.props,
-            oldProps: oldState?.props,
-            oldAttr: oldState?.attr,
-          },
-          props: newBinding.props,
-          attr: oldBinding.attr,
-          target,
-        })
-        .pipe(Effect.provide(Layer.succeed(InstanceId, oldState.instanceId)));
-
-      if (diff?.action === "update" || diff?.action === "replace") {
-        return diff;
-      }
-    }
-  }
-  return {
-    action:
-      oldBinding.capability.action !== newBinding.capability.action ||
-      oldBinding.capability?.resource?.id !==
-        newBinding.capability?.resource?.id
-        ? "update"
-        : "noop",
-  } as const;
-});
 // TODO(sam): compare props
 // oldBinding.props !== newBinding.props;
 

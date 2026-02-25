@@ -2,7 +2,7 @@ import type lambda from "aws-lambda";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 
-import { Runtime } from "../../Runtime.ts";
+import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as SQS from "../SQS/index.ts";
 import type { Bucket } from "./Bucket.ts";
 import { BucketEventSource } from "./BucketEventSource.ts";
@@ -37,9 +37,9 @@ export const notifications = <
     ) => Effect.Effect<void, never, Req>,
   ) {
     // Bind the Bucket's bucketName Output to `this` environment
-    const BucketName = yield* bucket.bucketName();
+    const BucketName = yield* bucket.bucketName;
 
-    const runtime = yield* Runtime;
+    const ctx = yield* ExecutionContext;
 
     const parseEvent = (record: lambda.S3EventRecord) => ({
       type: record.eventName as S3EventType,
@@ -49,12 +49,12 @@ export const notifications = <
       eTag: record.s3.object.eTag,
     });
 
-    if (runtime.listen) {
+    if (ctx.listen) {
       yield* BucketEventSource(bucket, {
         events: props.events,
       });
 
-      yield* runtime.listen(
+      yield* ctx.listen(
         Effect.gen(function* () {
           const bucketName = yield* BucketName;
           return (event: any) => {

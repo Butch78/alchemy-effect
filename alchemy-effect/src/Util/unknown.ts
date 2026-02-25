@@ -1,5 +1,5 @@
 import type { Input } from "../Input.ts";
-import { type Output, isOutput } from "../Output/Output.ts";
+import { type Output, isOutput } from "../Output.ts";
 import type { IsAny } from "./types.ts";
 
 // @ts-expect-error - we want to allow any value to be checked for unknown

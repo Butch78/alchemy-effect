@@ -1,10 +1,13 @@
-import * as Effect from "effect/Effect";
-import { ref } from "./Ref.ts";
-import type { Stack, StackName, StackRefBuilders, StackRefs } from "./Stack.ts";
-
 import * as ServiceMap from "effect/ServiceMap";
 
-export interface StageConfig {
+export class Stage extends ServiceMap.Service<Stage, string>()("Stage") {}
+
+export class StageConfig extends ServiceMap.Service<
+  StageConfig,
+  StageConfigOptions
+>()("StageConfig") {}
+
+export interface StageConfigOptions {
   /**
    * Whether to retain the stage when destroying the stack.
    *
@@ -19,48 +22,3 @@ export interface StageConfig {
    */
   adopt?: boolean;
 }
-
-export class Stage extends ServiceMap.Service<Stage, string>()("Stage") {}
-
-export type Stages<Req = never, Err = never> = {
-  config: (stage: string) => StageConfig | Effect.Effect<StageConfig, Err, Req>;
-  ref<S extends Stack>(name: StackName<S>): StackRefs<S>;
-};
-
-export const defineStages = <Req = never, Err = never>(
-  config: (stage: string) => StageConfig | Effect.Effect<StageConfig, Err, Req>,
-): Stages<Req, Err> => ({
-  config,
-  ref: <S extends Stack>(stack: StackName<NoInfer<S>>): StackRefs<S> => {
-    const proxy = (get: (id: string) => any) =>
-      new Proxy({}, { get: (_, id: string) => get(id) });
-    const proxyStage = (stage: string) =>
-      proxy((resourceId: string) =>
-        ref({
-          stack,
-          stage,
-          resourceId,
-        }),
-      );
-    return proxy((stage) =>
-      stage == "as"
-        ? (builders: StackRefBuilders) =>
-            proxy((stage: string) => {
-              if (stage in builders) {
-                const builder = builders[stage as keyof typeof builders];
-                return typeof builder === "string"
-                  ? proxyStage(stage)
-                  : (...args: any[]) => proxyStage(builder(...args));
-              }
-              return proxyStage(stage);
-            })
-        : proxy((resourceId: string) =>
-            ref({
-              stack,
-              stage,
-              resourceId,
-            }),
-          ),
-    ) as StackRefs<S>;
-  },
-});

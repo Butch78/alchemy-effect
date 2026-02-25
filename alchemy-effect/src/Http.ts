@@ -1,5 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import type { HttpBodyError } from "effect/unstable/http/HttpBody";
+import type { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import type { HttpServerResponse } from "effect/unstable/http/HttpServerResponse";
 import { Middleware, type MiddlewareClass } from "./Server/Middleware.ts";
 import { Protocol } from "./Server/Protocol.ts";
@@ -56,3 +58,9 @@ export namespace middleware {
       },
     );
 }
+
+export const serve = Effect.fn(function* (
+  handler: (
+    request: HttpServerRequest,
+  ) => Effect.Effect<HttpServerResponse, HttpBodyError, HttpServerRequest>,
+) {});

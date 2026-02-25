@@ -81,6 +81,7 @@ export interface Table<
   ID extends string = string,
   Props extends TableProps<any, any, any, any> = TableProps<any, any, any, any>,
 > extends Resource<
+  Table,
   "AWS.DynamoDB.Table",
   ID,
   Props,

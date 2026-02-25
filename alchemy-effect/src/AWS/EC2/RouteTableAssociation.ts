@@ -3,7 +3,7 @@ import * as ec2 from "distilled-aws/ec2";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
-import type { ScopedPlanStatusSession } from "../../Cli.ts";
+import type { ScopedPlanStatusSession } from "../../Cli/CLI.ts";
 import type { Input } from "../../Input.ts";
 import { Resource } from "../../Resource.ts";
 import type { RouteTableId } from "./RouteTable.ts";
@@ -20,6 +20,7 @@ export interface RouteTableAssociation<
   ID extends string = string,
   Props extends RouteTableAssociationProps = RouteTableAssociationProps,
 > extends Resource<
+  RouteTableAssociation,
   "AWS.EC2.RouteTableAssociation",
   ID,
   Props,

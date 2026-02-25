@@ -17,6 +17,7 @@ export interface SecurityGroupRule<
   ID extends string = string,
   Props extends SecurityGroupRuleProps = SecurityGroupRuleProps,
 > extends Resource<
+  SecurityGroupRule,
   "AWS.EC2.SecurityGroupRule",
   ID,
   Props,
