@@ -17,13 +17,16 @@ interface BaseExecutionContext<Type extends string> {
 export interface FunctionExecutionContext<
   Type extends string = string,
 > extends BaseExecutionContext<Type> {
-  listen: <A, Req = never, InitReq = never>(
+  listen<A, Req = never>(
+    handler: (event: any) => Effect.Effect<A, never, Req> | void,
+  ): Effect.Effect<A, never, Req>;
+  listen<A, Req = never, InitReq = never>(
     effect: Effect.Effect<
       (event: any) => Effect.Effect<A, never, Req> | void,
       never,
       InitReq
     >,
-  ) => Effect.Effect<A, never, Req | InitReq>;
+  ): Effect.Effect<A, never, Req | InitReq>;
   run?: never;
 }
 

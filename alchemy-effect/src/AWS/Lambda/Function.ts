@@ -33,6 +33,7 @@ import { Account } from "../Account.ts";
 import { Assets } from "../Assets.ts";
 import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
+import type { FunctionRuntime } from "./FunctionRuntime.ts";
 
 export const isFunction = <T>(value: T): value is T & Function => {
   return (
@@ -45,14 +46,13 @@ export const isFunction = <T>(value: T): value is T & Function => {
 
 export type Context = lambda.Context;
 
-export type FunctionRuntime = "nodejs22.x" | "nodejs24.x";
-
 export interface FunctionProps {
   main: string;
   handler?: string;
   url?: boolean;
   functionName?: string;
-  runtime?: FunctionRuntime;
+  // TODO(sam): use a Layer instead so we can manage Effect platform?
+  runtime?: "nodejs22.x" | "nodejs24.x";
 }
 
 export interface FunctionBinding {
@@ -78,7 +78,8 @@ export type Provided =
   | Region
   | HttpClient
   | ExecutionContext
-  | Scope;
+  | Scope
+  | FunctionRuntime;
 
 export const Function = Resource<{
   <

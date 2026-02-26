@@ -1,14 +1,13 @@
-import type * as runtime from "@cloudflare/workers-types";
-import { FileSystem, Path } from "@effect/platform";
-import type { PlatformError } from "@effect/platform/Error";
-import { Context, Data, Layer } from "effect";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
-import { Binding } from "../../Binding.ts";
-import { declare, type Capability } from "../../Capability.ts";
-import type { ScopedPlanStatusSession } from "../../Cli.ts";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import type { PlatformError } from "effect/PlatformError";
+import * as ServiceMap from "effect/ServiceMap";
+import type { ScopedPlanStatusSession } from "../../Cli/CLI.ts";
 import { sha256 } from "../../Util/index.ts";
 import { CloudflareApi, CloudflareApiError } from "../CloudflareApi.ts";
-import { getCloudflareEnvKey } from "../CloudflareContext.ts";
 import { Worker } from "./Worker.ts";
 
 const MAX_ASSET_SIZE = 1024 * 1024 * 25; // 25MB
@@ -24,7 +23,7 @@ export declare namespace Assets {
   }
 }
 
-export class Assets extends Context.Tag("Assets")<
+export class Assets extends ServiceMap.Service<
   Assets,
   {
     read(
@@ -40,7 +39,7 @@ export class Assets extends Context.Tag("Assets")<
       PlatformError | ValidationError | CloudflareApiError
     >;
   }
->() {}
+>()("Cloudflare.Assets") {}
 
 export class AssetTooLargeError extends Data.TaggedError("AssetTooLargeError")<{
   message: string;
@@ -85,7 +84,9 @@ export const assetsProvider = () =>
         return yield* fs.readFileString(file).pipe(
           Effect.catchIf(
             (error) =>
-              error._tag === "SystemError" && error.reason === "NotFound",
+              error._tag === "PlatformError" &&
+              error.reason._tag === "SystemError" &&
+              error.reason.kind === "NotFound",
             () => Effect.succeed(undefined),
           ),
         );
@@ -251,25 +252,3 @@ export const assetsProvider = () =>
       };
     }),
   );
-
-export interface Fetch extends Capability<"Cloudflare.Assets.Fetch"> {}
-
-export const Fetch = Binding<() => Binding<Worker, Fetch>>(
-  Worker,
-  "Cloudflare.Assets.Fetch",
-);
-
-export const fetch = Effect.fnUntraced(function* (
-  input: RequestInfo | URL,
-  init?: RequestInit,
-) {
-  yield* declare<Fetch>();
-  const fetcher = yield* getCloudflareEnvKey<runtime.Fetcher>("ASSETS");
-  return yield* Effect.promise(
-    (): Promise<Response> =>
-      fetcher.fetch(
-        input as URL | runtime.RequestInfo,
-        init as runtime.RequestInit<runtime.CfProperties<unknown>>,
-      ) as any,
-  );
-});

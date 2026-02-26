@@ -1,49 +1,67 @@
 import * as S3 from "distilled-aws/s3";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 
 import * as Binding from "../../Binding.ts";
 import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as Output from "../../Output.ts";
-import * as AWS from "../index.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Bucket } from "./Bucket.ts";
 
 export interface PutObjectRequest extends Omit<S3.PutObjectRequest, "Bucket"> {}
 
-export const PutObject = Effect.fn(function* <B extends Bucket>(bucket: B) {
-  yield* bindPutObject(bucket);
-  const BucketName = yield* bucket.bucketName;
-  return yield* AWS.withContext(
-    Effect.fn(function* (request: PutObjectRequest) {
-      return yield* S3.putObject({
-        ...request,
-        Bucket: yield* BucketName,
-      });
-    }),
-  );
-});
+export class PutObject extends Binding.Service<
+  PutObject,
+  (
+    bucket: Bucket,
+  ) => Effect.Effect<(request: PutObjectRequest) => Effect.Effect<any, any, any>>
+>()("AWS.S3.PutObject") {}
 
-export const bindPutObject = Binding.fn<PutObjectBinding>("AWS.S3.PutObject");
+export const PutObjectLive = Layer.effect(
+  PutObject,
+  // @ts-expect-error
+  Effect.gen(function* () {
+    const Policy = yield* PutObjectPolicy;
 
-export class PutObjectBinding extends Binding.Service(
-  "AWS.S3.PutObject",
-  Effect.fn(function* <B extends Bucket>(bucket: B) {
-    const ctx = yield* ExecutionContext;
-    if (Lambda.isFunction(ctx)) {
-      yield* ctx.bind({
-        policyStatements: [
-          {
-            Sid: "PutObject",
-            Effect: "Allow",
-            Action: ["s3:PutObject"],
-            Resource: [Output.interpolate`${bucket.bucketArn}/*`],
-          },
-        ],
+    return Effect.fn(function* (bucket: Bucket) {
+      const BucketName = yield* bucket.bucketName;
+      yield* Policy(bucket);
+      return Effect.fn(function* (request: PutObjectRequest) {
+        return yield* S3.putObject({
+          ...request,
+          Bucket: yield* BucketName,
+        });
       });
-    } else {
-      return yield* Effect.die(
-        `PutObjectBinding does not support runtime '${ctx.type}'`,
-      );
-    }
+    });
   }),
-) {}
+);
+
+export class PutObjectPolicy extends Binding.Policy<
+  PutObjectPolicy,
+  (bucket: Bucket) => Effect.Effect<void>
+>()("AWS.S3.PutObject") {}
+
+export const PutObjectPolicyLive = Layer.effect(
+  PutObjectPolicy,
+  Effect.gen(function* () {
+    const ctx = yield* ExecutionContext;
+    return Effect.fn(function* (bucket: Bucket) {
+      if (Lambda.isFunction(ctx)) {
+        return yield* ctx.bind({
+          policyStatements: [
+            {
+              Sid: "PutObject",
+              Effect: "Allow",
+              Action: ["s3:PutObject"],
+              Resource: [Output.interpolate`${bucket.bucketArn}/*`],
+            },
+          ],
+        });
+      } else {
+        return yield* Effect.die(
+          `PutObjectPolicy does not support runtime '${ctx.type}'`,
+        );
+      }
+    });
+  }),
+);

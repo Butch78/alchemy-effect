@@ -5,7 +5,6 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import type { Input } from "../../Input.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import type { Provider } from "../../Provider.ts";
 import { Resource, type ResourceEffect } from "../../Resource.ts";
 import { diffTags } from "../../Tags.ts";
 import { Account, type AccountID } from "../Account.ts";
@@ -68,8 +67,6 @@ export interface BucketAttrs<Props extends Input.Resolve<BucketProps>> {
    */
   accountId: AccountID;
 }
-
-export type BucketProvider = Provider<Bucket>;
 
 export const Bucket = Resource<{
   <const ID extends string, const Props extends BucketProps>(

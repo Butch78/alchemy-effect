@@ -1,9 +1,9 @@
 import * as sqs from "distilled-aws/sqs";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Binding from "../../Binding.ts";
 import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as Output from "../../Output.ts";
-import * as AWS from "../index.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Queue } from "./Queue.ts";
 
@@ -12,44 +12,60 @@ export interface SendMessageBatchRequest extends Omit<
   "QueueUrl"
 > {}
 
-export const SendMessageBatch = Effect.fn(function* <Q extends Queue>(
-  queue: Q,
-) {
-  yield* bindSendMessageBatch(queue);
-  const QueueUrl = yield* queue.queueUrl;
-  return yield* AWS.withContext(
-    Effect.fn(function* (request: SendMessageBatchRequest) {
-      return yield* sqs.sendMessageBatch({
-        ...request,
-        QueueUrl: yield* QueueUrl,
-      });
-    }),
-  );
-});
+export class SendMessageBatch extends Binding.Service<
+  SendMessageBatch,
+  (
+    queue: Queue,
+  ) => Effect.Effect<
+    (request: SendMessageBatchRequest) => Effect.Effect<any, any, any>
+  >
+>()("AWS.SQS.SendMessageBatch") {}
 
-export const bindSendMessageBatch = Binding.fn<SendMessageBatchBinding>(
-  "AWS.SQS.SendMessageBatch",
+export const SendMessageBatchLive = Layer.effect(
+  SendMessageBatch,
+  // @ts-expect-error
+  Effect.gen(function* () {
+    const Policy = yield* SendMessageBatchPolicy;
+
+    return Effect.fn(function* (queue: Queue) {
+      const QueueUrl = yield* queue.queueUrl;
+      yield* Policy(queue);
+      return Effect.fn(function* (request: SendMessageBatchRequest) {
+        return yield* sqs.sendMessageBatch({
+          ...request,
+          QueueUrl: yield* QueueUrl,
+        });
+      });
+    });
+  }),
 );
 
-export class SendMessageBatchBinding extends Binding.Service(
-  "AWS.SQS.SendMessageBatch",
-  Effect.fn(function* <Q extends Queue>(queue: Q) {
+export class SendMessageBatchPolicy extends Binding.Policy<
+  SendMessageBatchPolicy,
+  (queue: Queue) => Effect.Effect<void>
+>()("AWS.SQS.SendMessageBatch") {}
+
+export const SendMessageBatchPolicyLive = Layer.effect(
+  SendMessageBatchPolicy,
+  Effect.gen(function* () {
     const ctx = yield* ExecutionContext;
-    if (Lambda.isFunction(ctx)) {
-      yield* ctx.bind({
-        policyStatements: [
-          {
-            Sid: "SendMessageBatch",
-            Effect: "Allow",
-            Action: ["sqs:SendMessage"],
-            Resource: [Output.interpolate`${queue.queueArn}`],
-          },
-        ],
-      });
-    } else {
-      return yield* Effect.die(
-        `SendMessageBatchBinding does not support runtime '${ctx.type}'`,
-      );
-    }
+    return Effect.fn(function* (queue: Queue) {
+      if (Lambda.isFunction(ctx)) {
+        return yield* ctx.bind({
+          policyStatements: [
+            {
+              Sid: "SendMessageBatch",
+              Effect: "Allow",
+              Action: ["sqs:SendMessage"],
+              Resource: [Output.interpolate`${queue.queueArn}`],
+            },
+          ],
+        });
+      } else {
+        return yield* Effect.die(
+          `SendMessageBatchPolicy does not support runtime '${ctx.type}'`,
+        );
+      }
+    });
   }),
-) {}
+);

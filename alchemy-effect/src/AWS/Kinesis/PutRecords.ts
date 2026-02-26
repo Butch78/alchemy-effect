@@ -1,9 +1,9 @@
 import * as Kinesis from "distilled-aws/kinesis";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Binding from "../../Binding.ts";
 import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as Output from "../../Output.ts";
-import * as AWS from "../index.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Stream } from "./Stream.ts";
 
@@ -12,42 +12,58 @@ export interface PutRecordsRequest extends Omit<
   "StreamName"
 > {}
 
-export const PutRecords = Effect.fn(function* <S extends Stream>(stream: S) {
-  yield* bindPutRecords(stream);
-  const StreamName = yield* stream.streamName;
-  return yield* AWS.withContext(
-    Effect.fn(function* (request: PutRecordsRequest) {
-      return yield* Kinesis.putRecords({
-        ...request,
-        StreamName: yield* StreamName,
-      });
-    }),
-  );
-});
+export class PutRecords extends Binding.Service<
+  PutRecords,
+  (
+    stream: Stream,
+  ) => Effect.Effect<(request: PutRecordsRequest) => Effect.Effect<any, any, any>>
+>()("AWS.Kinesis.PutRecords") {}
 
-export const bindPutRecords = Binding.fn<PutRecordsBinding>(
-  "AWS.Kinesis.PutRecords",
+export const PutRecordsLive = Layer.effect(
+  PutRecords,
+  // @ts-expect-error
+  Effect.gen(function* () {
+    const Policy = yield* PutRecordsPolicy;
+
+    return Effect.fn(function* (stream: Stream) {
+      const StreamName = yield* stream.streamName;
+      yield* Policy(stream);
+      return Effect.fn(function* (request: PutRecordsRequest) {
+        return yield* Kinesis.putRecords({
+          ...request,
+          StreamName: yield* StreamName,
+        });
+      });
+    });
+  }),
 );
 
-export class PutRecordsBinding extends Binding.Service(
-  "AWS.Kinesis.PutRecords",
-  Effect.fn(function* <S extends Stream>(stream: S) {
+export class PutRecordsPolicy extends Binding.Policy<
+  PutRecordsPolicy,
+  (stream: Stream) => Effect.Effect<void>
+>()("AWS.Kinesis.PutRecords") {}
+
+export const PutRecordsPolicyLive = Layer.effect(
+  PutRecordsPolicy,
+  Effect.gen(function* () {
     const ctx = yield* ExecutionContext;
-    if (Lambda.isFunction(ctx)) {
-      yield* ctx.bind({
-        policyStatements: [
-          {
-            Sid: "PutRecords",
-            Effect: "Allow",
-            Action: ["kinesis:PutRecords"],
-            Resource: [Output.interpolate`${stream.streamArn}`],
-          },
-        ],
-      });
-    } else {
-      return yield* Effect.die(
-        `PutRecordsBinding does not support runtime '${ctx.type}'`,
-      );
-    }
+    return Effect.fn(function* (stream: Stream) {
+      if (Lambda.isFunction(ctx)) {
+        return yield* ctx.bind({
+          policyStatements: [
+            {
+              Sid: "PutRecords",
+              Effect: "Allow",
+              Action: ["kinesis:PutRecords"],
+              Resource: [Output.interpolate`${stream.streamArn}`],
+            },
+          ],
+        });
+      } else {
+        return yield* Effect.die(
+          `PutRecordsPolicy does not support runtime '${ctx.type}'`,
+        );
+      }
+    });
   }),
-) {}
+);

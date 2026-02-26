@@ -17,6 +17,7 @@ export class JobStorage extends ServiceMap.Service<
 export const jobStorage = Layer.effect(
   JobStorage,
   Effect.gen(function* () {
+    const Bucket = yield* S3.Bucket;
     const bucket = yield* S3.Bucket("JobsBucket");
 
     const getObject = yield* S3.GetObject(bucket);

@@ -1,26 +1,21 @@
-import type * as runtime from "@cloudflare/workers-types";
-import * as FileSystem from "@effect/platform/FileSystem";
-import * as Path from "@effect/platform/Path";
 import type { Workers } from "cloudflare/resources";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 import { sha256 } from "../..//Util/sha256.ts";
 import * as ESBuild from "../../Bundle/ESBuild.ts";
-import type { Capability } from "../../Capability.ts";
 import type { ScopedPlanStatusSession } from "../../Cli/index.ts";
 import { DotAlchemy } from "../../Config.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
+import { Resource, type ResourceEffect } from "../../Resource.ts";
 import { Account } from "../Account.ts";
 import { CloudflareApi } from "../CloudflareApi.ts";
-import { CloudflareContext } from "../CloudflareContext.ts";
 import * as Assets from "./Assets.ts";
 
-export const WorkerType = "Cloudflare.Worker" as const;
-export type WorkerType = typeof WorkerType;
-
-export type WorkerProps<Req = any> = {
+export type WorkerProps = {
   name?: string;
+  assets?: string | Worker.AssetsProps;
   logpush?: boolean;
   observability?: Worker.Observability;
   subdomain?: Worker.Subdomain;
@@ -32,15 +27,13 @@ export type WorkerProps<Req = any> = {
   };
   limits?: Worker.Limits;
   placement?: Worker.Placement;
-} & (Extract<Req, Assets.Fetch> extends never
-  ? {
-      assets?: string | Worker.AssetsProps;
-    }
-  : {
-      assets: string | Worker.AssetsProps;
-    });
+};
 
-export type WorkerAttr<Props extends WorkerProps<any>> = {
+export interface WorkerBinding {
+  bindings: Worker.Binding[];
+}
+
+export interface WorkerAttr<Props extends WorkerProps> {
   workerId: string;
   workerName: Props["name"] extends string ? Props["name"] : string;
   logpush: Props["logpush"] extends boolean ? Props["logpush"] : boolean;
@@ -49,29 +42,44 @@ export type WorkerAttr<Props extends WorkerProps<any>> = {
     : {
         // whatever cloudflare's (or our, probably ours) default is
       };
-  url: Props["subdomain"] extends { enabled: false } ? undefined : string;
-  subdomain: Props["subdomain"] extends Worker.Subdomain
-    ? Props["subdomain"]
+  url: Props["subdomain"] extends { enabled: infer B }
+    ? B extends false
+      ? undefined
+      : string
+    : string;
+  subdomain: Props["subdomain"] extends {
+    enabled: infer E;
+    previews_enabled: infer P;
+  }
+    ? { enabled: E; previews_enabled: P }
     : { enabled: true; previews_enabled: true };
   tags: Props["tags"] extends string[] ? Props["tags"] : string[];
   accountId: string;
   hash: { assets: string | undefined; bundle: string };
-};
-
-export interface Worker extends Runtime<WorkerType> {
-  base: Worker;
-  props: WorkerProps<any>;
-  attr: WorkerAttr<Extract<this["props"], WorkerProps<any>>>;
-  binding: {
-    bindings: Worker.Binding[];
-  };
 }
 
-export const Worker = Runtime(WorkerType)<Worker>();
+export interface Worker<
+  Id extends string = string,
+  Props extends WorkerProps = WorkerProps,
+> extends Resource<
+  Worker,
+  "Cloudflare.Worker",
+  Id,
+  Props,
+  WorkerAttr<Props>,
+  WorkerBinding
+> {}
+
+export const Worker = Resource<{
+  <const Id extends string, const Props extends WorkerProps>(
+    id: Id,
+    props?: Props,
+  ): ResourceEffect<Worker<Id, Props>>;
+}>("Cloudflare.Worker");
 
 export declare namespace Worker {
   export type Observability = Workers.ScriptUpdateParams.Metadata.Observability;
-  export type Subdomain = Workers.Beta.Worker.Subdomain;
+  export type Subdomain = Workers.Beta.Workers.Worker.Subdomain;
   export type Binding = NonNullable<
     Workers.Beta.Workers.VersionCreateParams["bindings"]
   >[number];
@@ -98,17 +106,14 @@ export const WorkerProvider = () =>
       const path = yield* Path.Path;
       const dotAlchemy = yield* DotAlchemy;
 
-      const getAccountSubdomain = yield* Effect.cachedFunction(
-        Effect.fnUntraced(function* (accountId: string) {
-          const { subdomain } = yield* api.workers.subdomains.get({
-            account_id: accountId,
-          });
-          return subdomain;
-        }),
-      );
-
-      // pre-fetch subdomain in background
-      yield* Effect.forkDaemon(getAccountSubdomain(accountId));
+      const getAccountSubdomain = Effect.fnUntraced(function* (
+        accountId: string,
+      ) {
+        const { subdomain } = yield* api.workers.subdomains.get({
+          account_id: accountId,
+        });
+        return subdomain;
+      });
 
       const setWorkerSubdomain = Effect.fnUntraced(function* (
         name: string,
@@ -164,9 +169,7 @@ export const WorkerProvider = () =>
         };
       });
 
-      const prepareMetadata = Effect.fnUntraced(function* (
-        props: WorkerProps<any>,
-      ) {
+      const prepareMetadata = Effect.fnUntraced(function* (props: WorkerProps) {
         const metadata: Workers.ScriptUpdateParams.Metadata = {
           assets: undefined,
           bindings: [],
@@ -196,10 +199,10 @@ export const WorkerProvider = () =>
 
       const putWorker = Effect.fnUntraced(function* (
         id: string,
-        news: WorkerProps<any>,
+        news: WorkerProps,
         bindings: Worker["binding"][],
-        olds: WorkerProps<any> | undefined,
-        output: WorkerAttr<WorkerProps<any>> | undefined,
+        olds: WorkerProps | undefined,
+        output: WorkerAttr<WorkerProps> | undefined,
         session: ScopedPlanStatusSession,
       ) {
         const name = yield* createWorkerName(id, news.name);
@@ -263,7 +266,7 @@ export const WorkerProvider = () =>
             assets: assets?.hash,
             bundle: bundle.hash,
           },
-        } as WorkerAttr<WorkerProps<any>>;
+        } as WorkerAttr<WorkerProps>;
       });
 
       return {
@@ -309,7 +312,7 @@ export const WorkerProvider = () =>
               ? `https://${workerName}.${yield* getAccountSubdomain(accountId)}.workers.dev`
               : undefined,
             tags: worker.tags,
-          } as WorkerAttr<WorkerProps<any>>;
+          } as WorkerAttr<WorkerProps>;
         }),
         create: Effect.fnUntraced(function* ({ id, news, bindings, session }) {
           const name = yield* createWorkerName(id, news.name);
@@ -352,44 +355,3 @@ export const WorkerProvider = () =>
       };
     }),
   );
-
-type Handler = (
-  request: Request,
-  env: unknown,
-  ctx: runtime.ExecutionContext,
-) => Effect.Effect<Response, any, CloudflareContext>;
-type HandlerFactory<H extends Handler, Req = Capability> = Effect.Effect<
-  H,
-  any,
-  Req
->;
-
-export const toHandler = <H extends Handler>(
-  factory: HandlerFactory<H, Capability>,
-) => {
-  return {
-    fetch: async (
-      request: Request,
-      env: unknown,
-      ctx: runtime.ExecutionContext,
-    ) => {
-      const exit = await Effect.runPromiseExit(
-        (factory as HandlerFactory<H, never>).pipe(
-          Effect.flatMap((handler) => handler(request, env, ctx)),
-          Effect.provide(Layer.succeed(CloudflareContext, { env, ctx })),
-        ),
-      );
-      if (exit._tag === "Success") {
-        return exit.value;
-      }
-      return Response.json(exit, { status: 500 });
-    },
-  };
-};
-
-export const serve =
-  <const Props extends WorkerProps>(props: Props) =>
-  <Svc extends ServiceDef, Err, Cap extends Capability>(
-    t: Unbound<Svc, Err, Cap>,
-  ): Hosted<Worker, InstanceType<Svc>, Err, Cap> =>
-    undefined!;

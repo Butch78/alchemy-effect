@@ -1,9 +1,9 @@
 import * as S3 from "distilled-aws/s3";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Binding from "../../Binding.ts";
 import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as Output from "../../Output.ts";
-import * as AWS from "../index.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Bucket } from "./Bucket.ts";
 
@@ -12,41 +12,58 @@ export interface UploadPartRequest extends Omit<
   "Bucket"
 > {}
 
-export const UploadPart = Effect.fn(function* <B extends Bucket>(bucket: B) {
-  yield* bindUploadPart(bucket);
-  const BucketName = yield* bucket.bucketName;
-  return yield* AWS.withContext(
-    Effect.fn(function* (request: UploadPartRequest) {
-      return yield* S3.uploadPart({
-        ...request,
-        Bucket: yield* BucketName,
-      });
-    }),
-  );
-});
+export class UploadPart extends Binding.Service<
+  UploadPart,
+  (
+    bucket: Bucket,
+  ) => Effect.Effect<(request: UploadPartRequest) => Effect.Effect<any, any, any>>
+>()("AWS.S3.UploadPart") {}
 
-export const bindUploadPart =
-  Binding.fn<UploadPartBinding>("AWS.S3.UploadPart");
+export const UploadPartLive = Layer.effect(
+  UploadPart,
+  // @ts-expect-error
+  Effect.gen(function* () {
+    const Policy = yield* UploadPartPolicy;
 
-export class UploadPartBinding extends Binding.Service(
-  "AWS.S3.UploadPart",
-  Effect.fn(function* <B extends Bucket>(bucket: B) {
-    const ctx = yield* ExecutionContext;
-    if (Lambda.isFunction(ctx)) {
-      yield* ctx.bind({
-        policyStatements: [
-          {
-            Sid: "UploadPart",
-            Effect: "Allow",
-            Action: ["s3:PutObject"],
-            Resource: [Output.interpolate`${bucket.bucketArn}/*`],
-          },
-        ],
+    return Effect.fn(function* (bucket: Bucket) {
+      const BucketName = yield* bucket.bucketName;
+      yield* Policy(bucket);
+      return Effect.fn(function* (request: UploadPartRequest) {
+        return yield* S3.uploadPart({
+          ...request,
+          Bucket: yield* BucketName,
+        });
       });
-    } else {
-      return yield* Effect.die(
-        `UploadPartBinding does not support runtime '${ctx.type}'`,
-      );
-    }
+    });
   }),
-) {}
+);
+
+export class UploadPartPolicy extends Binding.Policy<
+  UploadPartPolicy,
+  (bucket: Bucket) => Effect.Effect<void>
+>()("AWS.S3.UploadPart") {}
+
+export const UploadPartPolicyLive = Layer.effect(
+  UploadPartPolicy,
+  Effect.gen(function* () {
+    const ctx = yield* ExecutionContext;
+    return Effect.fn(function* (bucket: Bucket) {
+      if (Lambda.isFunction(ctx)) {
+        return yield* ctx.bind({
+          policyStatements: [
+            {
+              Sid: "UploadPart",
+              Effect: "Allow",
+              Action: ["s3:PutObject"],
+              Resource: [Output.interpolate`${bucket.bucketArn}/*`],
+            },
+          ],
+        });
+      } else {
+        return yield* Effect.die(
+          `UploadPartPolicy does not support runtime '${ctx.type}'`,
+        );
+      }
+    });
+  }),
+);
