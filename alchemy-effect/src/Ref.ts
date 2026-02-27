@@ -1,5 +1,5 @@
 import * as Output from "./Output.ts";
-import type { AnyResource, Resource } from "./Resource.ts";
+import type { ResourceLike } from "./Resource.ts";
 
 // special runtime-only symbol for probing the Ref proxy for its metadata
 const RefMetadata = Symbol.for("alchemy/RefMetadata");
@@ -7,26 +7,24 @@ const RefMetadata = Symbol.for("alchemy/RefMetadata");
 export const isRef = (s: any): s is Ref<any> =>
   s && s[RefMetadata] !== undefined;
 
-export const getRefMetadata = <R extends Resource<string, string, any, any>>(
+export const getRefMetadata = <R extends ResourceLike>(
   ref: Ref<R>,
 ): RefMetadata<R> => (ref as any)[RefMetadata];
 
-export interface Ref<
-  R extends Resource<string, string, any, any> = AnyResource,
-> {
+export interface Ref<R extends ResourceLike = ResourceLike> {
   /** @internal phantom */
   Ref: R;
 }
 
-export interface RefMetadata<R extends Resource<string, string, any, any>> {
+export interface RefMetadata<R extends ResourceLike> {
+  id: R["LogicalId"];
   stack?: string;
   stage?: string;
-  resourceId: R["id"];
 }
 
-export const ref = <R extends Resource<string, string, any, any>>({
+export const ref = <R extends ResourceLike>({
   stack,
-  resourceId,
+  id,
   stage,
 }: RefMetadata<R>): Ref<R> => {
   const ref = new Proxy(
@@ -37,8 +35,8 @@ export const ref = <R extends Resource<string, string, any, any>>({
           return {
             stack,
             stage,
-            resourceId,
-          };
+            id,
+          } satisfies RefMetadata<R>;
         }
         return (Output.of(ref) as any)[prop];
       },

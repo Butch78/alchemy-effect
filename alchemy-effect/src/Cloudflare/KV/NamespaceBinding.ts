@@ -9,7 +9,7 @@ export const NamespaceBinding = Effect.gen(function* () {
       bindings: [
         {
           type: "kv_namespace",
-          name: namespace.id,
+          name: namespace.LogicalId,
           namespace_id: namespace.namespaceId,
         },
       ],

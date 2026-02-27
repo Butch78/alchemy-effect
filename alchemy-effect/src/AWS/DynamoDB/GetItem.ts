@@ -3,21 +3,21 @@ import * as DynamoDB from "distilled-aws/dynamodb";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Binding from "../../Binding.ts";
-import { ExecutionContext } from "../../ExecutionContext.ts";
+import { ExecutionContext } from "../../Executable.ts";
 import * as Output from "../../Output.ts";
 import * as Lambda from "../Lambda/index.ts";
 import { fromAttributeValue } from "./AttributeValue.ts";
 import type { Table } from "./Table.ts";
 
-export interface GetItemRequest<T extends Table> extends Omit<
+export interface GetItemRequest extends Omit<
   DynamoDB.GetItemInput,
   "TableName" | "Key"
 > {
-  Key: Table.Key<T>;
+  Key: Record<string, any>;
 }
 
-export interface GetItemResult<T extends Table, Key extends Table.Key<T>> {
-  Item: (InstanceType<T["props"]["items"]> & Key) | undefined;
+export interface GetItemResult {
+  Item: Record<string, any> | undefined;
   ConsumedCapacity?: ConsumedCapacity;
 }
 
@@ -27,8 +27,8 @@ export class GetItem extends Binding.Service<
     table: T,
   ) => Effect.Effect<
     (
-      request: GetItemRequest<T>,
-    ) => Effect.Effect<GetItemResult<T, Table.Key<T>>, DynamoDB.GetItemError>
+      request: GetItemRequest,
+    ) => Effect.Effect<GetItemResult, DynamoDB.GetItemError>
   >
 >()("AWS.DynamoDB.GetItem") {}
 
@@ -41,19 +41,19 @@ export const GetItemLive = Layer.effect(
     return Effect.fn(function* <T extends Table>(table: T) {
       const TableName = yield* table.tableName;
       yield* Policy(table);
-      return Effect.fn(function* (request: GetItemRequest<T>) {
+      return Effect.fn(function* (request: GetItemRequest) {
         const tableName = yield* TableName;
         const { Item, ...rest } = yield* getItem({
           ...request,
           TableName: tableName,
           Key: {
-            [table.props.partitionKey]: {
-              S: (request.Key as any)[table.props.partitionKey] as string,
+            [table.Props.partitionKey]: {
+              S: (request.Key as any)[table.Props.partitionKey] as string,
             },
-            ...(table.props.sortKey
+            ...(table.Props.sortKey
               ? {
-                  [table.props.sortKey]: {
-                    S: (request.Key as any)[table.props.sortKey] as string,
+                  [table.Props.sortKey]: {
+                    S: (request.Key as any)[table.Props.sortKey] as string,
                   },
                 }
               : {}),

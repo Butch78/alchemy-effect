@@ -247,7 +247,6 @@ export interface RuleProps {
  * ```
  */
 export interface Rule extends Resource<
-  Rule,
   "AWS.EventBridge.Rule",
   RuleProps,
   {

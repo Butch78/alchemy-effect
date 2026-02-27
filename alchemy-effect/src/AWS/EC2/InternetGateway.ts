@@ -33,7 +33,6 @@ export interface InternetGatewayProps {
 }
 
 export interface InternetGateway extends Resource<
-  InternetGateway,
   "AWS.EC2.InternetGateway",
   InternetGatewayProps,
   {

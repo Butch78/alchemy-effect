@@ -8,9 +8,7 @@ import { NamespaceBinding } from "./NamespaceBinding.ts";
 
 export class Delete extends Binding.Service<
   Delete,
-  (
-    namespace: Namespace,
-  ) => Effect.Effect<(key: string) => Effect.Effect<void>>
+  (namespace: Namespace) => Effect.Effect<(key: string) => Effect.Effect<void>>
 >()("Cloudflare.KV.Delete") {}
 
 export const DeleteLive = Layer.effect(
@@ -22,7 +20,7 @@ export const DeleteLive = Layer.effect(
     return Effect.fn(function* (namespace: Namespace) {
       yield* Policy(namespace);
       const kvNamespace = (env as Record<string, runtime.KVNamespace>)[
-        namespace.id
+        namespace.LogicalId
       ];
 
       return Effect.fn(function* (key: string) {
@@ -37,7 +35,4 @@ export class DeletePolicy extends Binding.Policy<
   (namespace: Namespace) => Effect.Effect<void>
 >()("Cloudflare.KV.Delete") {}
 
-export const DeletePolicyLive = Layer.effect(
-  DeletePolicy,
-  NamespaceBinding,
-);
+export const DeletePolicyLive = Layer.effect(DeletePolicy, NamespaceBinding);

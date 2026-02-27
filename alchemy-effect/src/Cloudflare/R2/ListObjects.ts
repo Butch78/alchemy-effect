@@ -25,7 +25,9 @@ export const ListObjectsLive = Layer.effect(
 
     return Effect.fn(function* (bucket: Bucket) {
       yield* Policy(bucket);
-      const r2Bucket = (env as Record<string, runtime.R2Bucket>)[bucket.id];
+      const r2Bucket = (env as Record<string, runtime.R2Bucket>)[
+        bucket.LogicalId
+      ];
 
       return Effect.fn(function* (options?: ListObjectsOptions) {
         return yield* Effect.promise(() => r2Bucket.list(options));

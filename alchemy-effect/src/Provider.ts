@@ -6,11 +6,11 @@ import type { Input } from "./Input.ts";
 import type { ResourceLike } from "./Resource.ts";
 
 export interface Provider<
-  R extends ResourceLike,
+  R extends ResourceLike = ResourceLike,
 > extends ServiceMap.ServiceClass<
   Provider<R>,
-  R["type"],
-  ProviderService<any>
+  R["Type"],
+  ProviderService<R>
   // TODO(sam): we are using any here because the R["type"] is enough and gaining access to the sub type (e.g. SQS.Queue)
   // is currently not possible in the current approach
 
@@ -24,7 +24,7 @@ type BindingData<Res extends ResourceLike> = [Res] extends [
   ? B[]
   : any[];
 
-type Props<Res extends ResourceLike> = Input.ResolveOpaque<Res["props"]>;
+type Props<Res extends ResourceLike> = Input.ResolveOpaque<Res["Props"]>;
 
 export interface ProviderService<
   Res extends ResourceLike = ResourceLike,
@@ -46,54 +46,55 @@ export interface ProviderService<
   // replace(): Effect.Effect<void, never, never>;
   // different interface that is persistent, watching, reloads
   // run?() {}
+  // branch?() {}
   read?(input: {
     id: string;
     instanceId: string;
     olds: Props<Res>;
     // what is the ARN?
-    output: Res["attr"] | undefined; // current state -> synced state
+    output: Res["Attributes"] | undefined; // current state -> synced state
     bindings: BindingData<Res>;
-  }): Effect.Effect<Res["attr"] | undefined, any, ReadReq>;
+  }): Effect.Effect<Res["Attributes"] | undefined, any, ReadReq>;
   /**
    * Properties that are always stable across any update.
    */
-  stables?: Extract<keyof Res["attr"], string>[];
+  stables?: Extract<keyof Res["Attributes"], string>[];
   diff?(input: {
     id: string;
     olds: Props<Res>;
     instanceId: string;
     // Note: we do not resolve (Props<Res>) here because diff runs during plan
     // -> we need a way for the diff handlers to work with Outputs
-    news: Res["props"];
-    output: Res["attr"];
+    news: Res["Props"];
+    output: Res["Attributes"];
   }): Effect.Effect<Diff | void, never, DiffReq>;
   precreate?(input: {
     id: string;
     news: Props<Res>;
     instanceId: string;
     session: ScopedPlanStatusSession;
-  }): Effect.Effect<Res["attr"], any, PrecreateReq>;
+  }): Effect.Effect<Res["Attributes"], any, PrecreateReq>;
   create(input: {
     id: string;
     instanceId: string;
     news: Props<Res>;
     session: ScopedPlanStatusSession;
     bindings: BindingData<Res>;
-  }): Effect.Effect<Res["attr"], any, CreateReq>;
+  }): Effect.Effect<Res["Attributes"], any, CreateReq>;
   update(input: {
     id: string;
     instanceId: string;
     news: Props<Res>;
     olds: Props<Res>;
-    output: Res["attr"];
+    output: Res["Attributes"];
     session: ScopedPlanStatusSession;
     bindings: BindingData<Res>;
-  }): Effect.Effect<Res["attr"], any, UpdateReq>;
+  }): Effect.Effect<Res["Attributes"], any, UpdateReq>;
   delete(input: {
     id: string;
     instanceId: string;
     olds: Props<Res>;
-    output: Res["attr"];
+    output: Res["Attributes"];
     session: ScopedPlanStatusSession;
     bindings: BindingData<Res>;
   }): Effect.Effect<void, any, DeleteReq>;

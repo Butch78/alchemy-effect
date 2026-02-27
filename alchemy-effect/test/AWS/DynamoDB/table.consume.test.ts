@@ -1,7 +1,7 @@
 import * as AWS from "@/aws";
 import { Table } from "@/aws/dynamodb";
 import * as Lambda from "@/aws/lambda";
-import { $, apply, destroy, type } from "@/index";
+import { $, apply, destroy } from "@/index";
 import { test } from "@/Test/Vitest";
 import { expect } from "@effect/vitest";
 import * as DynamoDB from "distilled-aws/dynamodb";
@@ -9,7 +9,6 @@ import * as lambdaApi from "distilled-aws/lambda";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import * as S from "effect/Schema";
 import path from "pathe";
 
 const main = path.resolve(import.meta.dirname, "..", "..", "handler.ts");
@@ -44,9 +43,8 @@ test(
   "create table consumer with consumeTable",
   Effect.gen(function* () {
     class TestTable extends Table("TestTable", {
-      items: type<{ id: string; name: string }>,
-      attributes: { id: S.String },
       partitionKey: "id",
+      attributes: { id: "S" },
     }) {}
 
     class TableConsumer extends Lambda.consumeTable("TableConsumer", {
@@ -102,9 +100,8 @@ test(
   "consumeTable with custom stream view type",
   Effect.gen(function* () {
     class KeysOnlyTable extends Table("KeysOnlyTable", {
-      items: type<{ id: string }>,
-      attributes: { id: S.String },
       partitionKey: "id",
+      attributes: { id: "S" },
     }) {}
 
     class KeysOnlyConsumer extends Lambda.consumeTable("KeysOnlyConsumer", {
@@ -140,9 +137,8 @@ test(
   "consumeTable with batch settings",
   Effect.gen(function* () {
     class BatchTable extends Table("BatchTable", {
-      items: type<{ id: string }>,
-      attributes: { id: S.String },
       partitionKey: "id",
+      attributes: { id: "S" },
     }) {}
 
     class BatchConsumer extends Lambda.consumeTable("BatchConsumer", {

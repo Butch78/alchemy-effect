@@ -6,8 +6,7 @@ import { CloudflareContext } from "../CloudflareContext.ts";
 import type { Namespace } from "./Namespace.ts";
 import { NamespaceBinding } from "./NamespaceBinding.ts";
 
-export interface GetWithMetadataOptions
-  extends runtime.KVNamespaceGetOptions<undefined> {}
+export interface GetWithMetadataOptions extends runtime.KVNamespaceGetOptions<undefined> {}
 
 export class GetWithMetadata extends Binding.Service<
   GetWithMetadata,
@@ -17,7 +16,9 @@ export class GetWithMetadata extends Binding.Service<
     <Metadata = unknown>(
       key: string,
       options?: GetWithMetadataOptions,
-    ) => Effect.Effect<runtime.KVNamespaceGetWithMetadataResult<string, Metadata>>
+    ) => Effect.Effect<
+      runtime.KVNamespaceGetWithMetadataResult<string, Metadata>
+    >
   >
 >()("Cloudflare.KV.GetWithMetadata") {}
 
@@ -30,13 +31,16 @@ export const GetWithMetadataLive = Layer.effect(
     return Effect.fn(function* (namespace: Namespace) {
       yield* Policy(namespace);
       const kvNamespace = (env as Record<string, runtime.KVNamespace>)[
-        namespace.id
+        namespace.LogicalId
       ];
 
       return <Metadata = unknown>(
         key: string,
         options?: GetWithMetadataOptions,
-      ) => Effect.promise(() => kvNamespace.getWithMetadata<Metadata>(key, options));
+      ) =>
+        Effect.promise(() =>
+          kvNamespace.getWithMetadata<Metadata>(key, options),
+        );
     });
   }),
 );

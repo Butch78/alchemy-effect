@@ -72,7 +72,6 @@ export interface SecurityGroupRuleProps {
 }
 
 export interface SecurityGroupRule extends Resource<
-  SecurityGroupRule,
   "AWS.EC2.SecurityGroupRule",
   SecurityGroupRuleProps,
   {
@@ -141,15 +140,6 @@ export const SecurityGroupRule = Resource<SecurityGroupRule>(
   "AWS.EC2.SecurityGroupRule",
 );
 
-type SecurityGroupRuleAttrsType = SecurityGroupRule extends Resource<
-  any,
-  any,
-  any,
-  infer A
->
-  ? A
-  : never;
-
 export const SecurityGroupRuleProvider = () =>
   SecurityGroupRule.provider.effect(
     Effect.gen(function* () {
@@ -186,7 +176,7 @@ export const SecurityGroupRuleProvider = () =>
               : never
           >
         >,
-      ): SecurityGroupRuleAttrsType => ({
+      ): SecurityGroupRule["Attributes"] => ({
         securityGroupRuleId: rule.SecurityGroupRuleId as SecurityGroupRuleId,
         groupId: rule.GroupId as SecurityGroupId,
         groupOwnerId: rule.GroupOwnerId!,

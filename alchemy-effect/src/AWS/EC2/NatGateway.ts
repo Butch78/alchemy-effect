@@ -77,7 +77,6 @@ export interface NatGatewayProps {
 }
 
 export interface NatGateway extends Resource<
-  NatGateway,
   "AWS.EC2.NatGateway",
   NatGatewayProps,
   {
@@ -185,7 +184,7 @@ export const NatGatewayProvider = () =>
           ),
         );
 
-      const toAttrs = (gw: ec2.NatGateway): NatGateway["attr"] => {
+      const toAttrs = (gw: ec2.NatGateway): NatGateway["Attributes"] => {
         const primaryAddress =
           gw.NatGatewayAddresses?.find((a) => a.IsPrimary) ??
           gw.NatGatewayAddresses?.[0];

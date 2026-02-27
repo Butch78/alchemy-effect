@@ -2,7 +2,7 @@ import * as sqs from "distilled-aws/sqs";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Binding from "../../Binding.ts";
-import { ExecutionContext } from "../../ExecutionContext.ts";
+import { ExecutionContext } from "../../Executable.ts";
 import * as Output from "../../Output.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Queue } from "./Queue.ts";
@@ -17,10 +17,9 @@ export class SendMessage extends Binding.Service<
   (
     queue: Queue,
   ) => Effect.Effect<
-    (request: SendMessageRequest) => Effect.Effect<
-      sqs.SendMessageResult,
-      sqs.SendMessageError
-    >
+    (
+      request: SendMessageRequest,
+    ) => Effect.Effect<sqs.SendMessageResult, sqs.SendMessageError>
   >
 >()("AWS.SQS.SendMessage") {}
 

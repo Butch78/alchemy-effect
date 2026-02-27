@@ -1,4 +1,4 @@
-import { apply, destroy, type } from "@/index";
+import { apply, destroy } from "@/index";
 
 import * as AWS from "@/aws";
 import { Table } from "@/aws/dynamodb";
@@ -8,18 +8,14 @@ import * as DynamoDB from "distilled-aws/dynamodb";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import * as S from "effect/Schema";
 
 test(
   "create, update, delete table",
   Effect.gen(function* () {
     class TestTable extends Table("TestTable", {
       tableName: "test",
-      items: type<{ id: string }>,
-      attributes: {
-        id: S.String,
-      },
       partitionKey: "id",
+      attributes: { id: "S" },
     }) {}
 
     const stack = yield* apply(TestTable);

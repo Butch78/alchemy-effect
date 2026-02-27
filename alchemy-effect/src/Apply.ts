@@ -4,7 +4,6 @@ import * as ServiceMap from "effect/ServiceMap";
 import type { Simplify } from "effect/Types";
 import type { Instance } from ".//Util/instance.ts";
 import { asEffect } from ".//Util/types.ts";
-import type { AnyBinding, BindingProvider } from "./Binding.ts";
 import {
   type PlanStatusSession,
   type ScopedPlanStatusSession,
@@ -15,17 +14,14 @@ import { generateInstanceId, InstanceId } from "./InstanceId.ts";
 import * as Output from "./Output.ts";
 import {
   type Apply,
-  type BindNode,
   type Delete,
   type DerivePlan,
   type IPlan,
-  type Providers,
   plan,
 } from "./Plan.ts";
 import { getProviderByType } from "./Provider.ts";
-import type { AnyResource, Resource } from "./Resource.ts";
-import type { AnyService } from "./Service.ts";
-import { StackName } from "./Stack.ts";
+import type { Resource, ResourceLike } from "./Resource.ts";
+import { Stack } from "./Stack.ts";
 import { Stage } from "./Stage.ts";
 import {
   type CreatedResourceState,
@@ -61,9 +57,7 @@ export type AppliedPlan<P extends IPlan> = {
     : Simplify<P["resources"][id]["resource"]["attr"]>;
 };
 
-export const apply = <
-  const Resources extends (AnyService | AnyResource)[] = never,
->(
+export const apply = <const Resources extends ResourceLike[] = never>(
   ...resources: Resources
 ): ApplyEffect<
   DerivePlan<Instance<Resources[number]>>,
@@ -105,7 +99,8 @@ const expandAndPivot = Effect.fnUntraced(function* (
   session: PlanStatusSession,
 ) {
   const state = yield* State;
-  const stackName = yield* StackName;
+  const stack = yield* Stack;
+  const stackName = stack.name;
   const stage = yield* Stage;
 
   const outputs = {} as Record<string, Effect.Effect<any, any, State>>;
@@ -752,8 +747,8 @@ const collectGarbage = Effect.fnUntraced(function* (
         provider,
       } = isDeleteNode(node)
         ? {
-            logicalId: node.resource.id,
-            resourceType: node.resource.type,
+            logicalId: node.resource.LogicalId,
+            resourceType: node.resource.Type,
             instanceId: node.state.instanceId,
             downstream: node.downstream,
             props: node.state.props,

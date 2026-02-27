@@ -98,7 +98,6 @@ export interface VpcEndpointProps {
 }
 
 export interface VpcEndpoint extends Resource<
-  VpcEndpoint,
   "AWS.EC2.VpcEndpoint",
   VpcEndpointProps,
   {
@@ -241,7 +240,7 @@ export const VpcEndpointProvider = () =>
           ),
         );
 
-      const toAttrs = (ep: ec2.VpcEndpoint): VpcEndpoint["attr"] => ({
+      const toAttrs = (ep: ec2.VpcEndpoint): VpcEndpoint["Attributes"] => ({
         vpcEndpointId: ep.VpcEndpointId as VpcEndpointId,
         vpcEndpointArn:
           `arn:aws:ec2:${region}:${accountId}:vpc-endpoint/${ep.VpcEndpointId}` as VpcEndpointArn,

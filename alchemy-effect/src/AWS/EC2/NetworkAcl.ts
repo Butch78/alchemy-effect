@@ -32,7 +32,6 @@ export interface NetworkAclProps {
 }
 
 export interface NetworkAcl extends Resource<
-  NetworkAcl,
   "AWS.EC2.NetworkAcl",
   NetworkAclProps,
   {

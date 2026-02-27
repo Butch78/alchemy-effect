@@ -8,7 +8,7 @@ import {
   type HttpServerResponse,
   text,
 } from "effect/unstable/http/HttpServerResponse";
-import { ExecutionContext } from "./ExecutionContext.ts";
+import { ExecutionContext } from "./Executable.ts";
 
 export const serve = Effect.fn(function* (
   handler: Effect.Effect<

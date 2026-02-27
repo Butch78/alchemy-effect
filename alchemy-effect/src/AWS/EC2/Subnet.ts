@@ -112,7 +112,6 @@ export interface SubnetProps {
 }
 
 export interface Subnet extends Resource<
-  Subnet,
   "AWS.EC2.Subnet",
   SubnetProps,
   {

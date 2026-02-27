@@ -10,7 +10,7 @@ export const BucketBinding = Effect.gen(function* () {
       bindings: [
         {
           type: "r2_bucket",
-          name: bucket.id,
+          name: bucket.LogicalId,
           bucket_name: bucket.bucketName,
           jurisdiction: bucket.jurisdiction.pipe(
             Output.map((jurisdiction) =>

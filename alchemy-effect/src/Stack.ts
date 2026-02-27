@@ -5,69 +5,45 @@ import * as ServiceMap from "effect/ServiceMap";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { DotAlchemy } from "./Config.ts";
 import type { ResourceLike } from "./Resource.ts";
-import type { Stage } from "./Stage.ts";
-
-export class StackName extends ServiceMap.Service<StackName, string>()(
-  "StackName",
-) {}
+import { Stage } from "./Stage.ts";
 
 export type StackServices =
-  | StackName
+  | Stack
   | Stage
   | FileSystem
   | Path
   | DotAlchemy
   | HttpClient;
 
-export type Stack<
-  Name extends string = string,
-  Resources = any,
-  Output = any,
-> = {
-  name: Name;
-  output: Output;
-  resources: Resources;
-};
+export class Stack extends ServiceMap.Service<
+  Stack,
+  {
+    name: string;
+    stage: string;
+    // @internal
+    resources: {
+      [logicalId: string]: ResourceLike;
+    };
+  }
+>()("Stack") {}
 
-export const make: {
-  <const Name extends string>(
-    name: Name,
-  ): <A, Err = never, Req extends StackServices | ResourceLike = never>(
-    eff: Effect.Effect<A, Err, Req>,
-  ) => Effect.Effect<
-    Stack<
-      Name,
-      {
-        [type in keyof ExtractResources<Req>]: ExtractResources<Req>[type];
-      },
-      A
-    >,
-    Err,
-    Exclude<Req, ResourceLike>
-  >;
-  <
-    const Name extends string,
-    A,
-    Err = never,
-    Req extends StackServices | ResourceLike = never,
-  >(
-    name: Name,
-    eff: Effect.Effect<A, Err, Req>,
-  ): Effect.Effect<
-    Stack<
-      Name,
-      {
-        [type in keyof ExtractResources<Req>]: ExtractResources<Req>[type];
-      },
-      A
-    >,
-    Err,
-    Exclude<Req, ResourceLike>
-  >;
-} = undefined!;
+export const StackName = Stack.use((stack) => Effect.succeed(stack.name));
 
-type ExtractResources<T> = AsRecord<Extract<T, ResourceLike>>;
-
-type AsRecord<T extends ResourceLike> = {
-  [id in T["id"]]: Extract<T, { id: id }>;
-};
+export const make =
+  <const Name extends string>(name: Name) =>
+  <A, Err = never>(effect: Effect.Effect<A, Err, StackServices>) =>
+    effect.pipe(
+      Effect.provideServiceEffect(
+        Stack,
+        Stage.asEffect().pipe(
+          Effect.map(
+            (stage) =>
+              ({
+                name,
+                stage,
+                resources: {},
+              }) satisfies Stack["Service"],
+          ),
+        ),
+      ),
+    );

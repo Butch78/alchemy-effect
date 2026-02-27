@@ -1,16 +1,17 @@
 import * as Effect from "effect/Effect";
 import type * as Layer from "effect/Layer";
-import type { Pipeable } from "effect/Pipeable";
-import type { PolicyLike } from "./Binding.ts";
+import { pipeArguments, type Pipeable } from "effect/Pipeable";
+import { SingleShotGen } from "effect/Utils";
 import type { Input } from "./Input.ts";
 import type { InstanceId } from "./InstanceId.ts";
-import type * as Output from "./Output.ts";
+import * as Output from "./Output.ts";
 import type { Provider, ProviderService } from "./Provider.ts";
+import { Stack } from "./Stack.ts";
 
 export type ResourceCtor<R extends ResourceLike, Req = never> = (
   id: string,
-  props?: R["props"],
-) => Effect.Effect<R, never, Req>;
+  props?: R["Props"],
+) => Effect.Effect<R, never, Req | Stack>;
 
 export type ResourceClass<Self extends ResourceLike> = ResourceCtor<
   Self,
@@ -20,90 +21,92 @@ export type ResourceClass<Self extends ResourceLike> = ResourceCtor<
     provider: ResourceProviders<Self>;
   };
 
+export type LogicalId = string;
+
 export interface ResourceLike<
-  Base = any,
   Type extends string = any,
   Props extends object = any,
   Attributes extends object = any,
   Binding = any,
 > extends Pipeable {
-  kind: "Resource";
-  id: string;
-  type: Type;
-  props: Props;
-  attr: Attributes;
-  base: Base;
-  binding: Binding;
-  /** @internal */
-  Resource: unknown;
+  Type: Type;
+  LogicalId: LogicalId;
+  Props: Props;
+  /** @internal phantom */
+  Attributes: Attributes;
+  /** @internal phantom */
+  Binding: Binding;
 }
 
 export type Resource<
-  Self extends ResourceLike = any,
   Type extends string = any,
   Props extends object = any,
   Attributes extends object = any,
   Binding = never,
-> = ResourceLike<Self, Type, Props, Attributes, Binding> & {
+> = ResourceLike<Type, Props, Attributes, Binding> & {
   bind(binding: Input<Binding>): Effect.Effect<void>;
 } & {
-  [attr in keyof Attributes]: Output.Output<Attributes[attr], never>;
+  [attr in keyof Attributes]-?: Output.Output<Attributes[attr], never>;
 };
 
 export const Resource = <R extends ResourceLike>(
-  type: R["type"],
+  type: R["Type"],
 ): ResourceClass<R> => {
-  const f = <const Id extends string, const P extends R["props"]>(
-    id: Id,
-    props?: P,
-  ): Effect.Effect<
-    (R & {
-      id: Id;
-      props: P;
-    })["Resource"],
-    never,
-    Provider<R>
-  > =>
-    Effect.gen(function* () {
-      //
-    });
+  const constructor = Effect.fnUntraced(function* (
+    id: string,
+    props?: R["Props"],
+  ) {
+    const stack = yield* Stack;
 
-  const Service = Effect.gen(function* () {
-    const services = yield* Effect.services();
-    return (id: string, props: R["props"]) =>
-      f(id, props).pipe(Effect.provide(services));
+    const existing = stack.resources[id];
+    if (existing) {
+      // TODO(sam): check if props are same and allow duplicates
+      return yield* Effect.die(new Error(`Resource ${id} already exists`));
+    }
+
+    const Resource = (stack.resources[id] = new Proxy(
+      {
+        Type: type,
+        LogicalId: id,
+        Props: props,
+        // Attributes: undefined!,
+        // Binding: undefined!,
+        bind() {},
+      } as any,
+      {
+        get: (target, prop) => {
+          if (prop in target) {
+            return target[prop as keyof typeof target];
+          }
+          const resourceExpr = Output.of(Resource as R) as Output.ResourceExpr<
+            R["Attributes"],
+            never
+          >;
+          return new Output.PropExpr(resourceExpr, prop);
+        },
+      },
+    )) as R;
+    return Resource;
   });
 
-  return Object.assign(f, Service);
-};
-
-export type RuntimeResourceCtor<
-  R extends ResourceLike,
-  Provided,
-  Req = never,
-> = {
-  (
-    id: string,
-    eff: Effect.Effect<R["props"], never, Req | Provider<any> | PolicyLike>,
-  ): Effect.Effect<R, never, Exclude<Req, Provided>>;
-  (
-    id: string,
-  ): (
-    eff: Effect.Effect<R["props"], never, Req | Provider<any> | PolicyLike>,
-  ) => Effect.Effect<R, never, Exclude<Req, Provided>>;
-};
-
-export type RuntimeResourceClass<
-  Self extends ResourceLike,
-  Provided,
-> = RuntimeResourceCtor<Self, Provider<Self>, Provided> &
-  Effect.Effect<RuntimeResourceCtor<Self, Provided>> & {
-    provider: ResourceProviders<Self>;
+  const Service = {
+    [Symbol.iterator]() {
+      return new SingleShotGen(this);
+    },
+    pipe() {
+      return pipeArguments(this.asEffect(), arguments);
+    },
+    asEffect() {
+      return Effect.map(
+        Effect.services(),
+        (services) => (id: string, props: R["Props"]) =>
+          constructor(id, props).pipe(Effect.provide(services)),
+      );
+    },
   };
 
-export const RuntimeResource = <R extends ResourceLike, Provided>(
-  type: R["type"],
-): RuntimeResourceClass<R, Provided> => {};
+  return Object.assign(constructor, Service) as any as ResourceClass<R>;
+};
 
 export interface ResourceProviders<Resource extends ResourceLike> {
   effect<

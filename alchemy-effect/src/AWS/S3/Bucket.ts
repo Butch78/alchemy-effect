@@ -37,7 +37,6 @@ export interface BucketProps {
 }
 
 export interface Bucket extends Resource<
-  Bucket,
   "AWS.S3.Bucket",
   BucketProps,
   {

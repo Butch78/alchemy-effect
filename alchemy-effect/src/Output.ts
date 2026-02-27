@@ -2,24 +2,20 @@ import * as Data from "effect/Data";
 import type { Yieldable } from "effect/Effect";
 import * as Effect from "effect/Effect";
 import type { Pipeable } from "effect/Pipeable";
-import { ExecutionContext } from "./ExecutionContext.ts";
+import { ExecutionContext } from "./Executable.ts";
 import { getRefMetadata, isRef, ref as stageRef, type Ref } from "./Ref.ts";
 import type { Resource, ResourceLike } from "./Resource.ts";
-import { StackName } from "./Stack.ts";
+import { Stack } from "./Stack.ts";
 import { Stage } from "./Stage.ts";
 import * as State from "./State/State.ts";
 import { isPrimitive } from "./Util/data.ts";
 
-export const of = <R extends Resource>(
+export const of = <R extends ResourceLike>(
   resource: Ref<R> | R,
-): ToOutput<R["attr"], R> => {
+): Output<R["Attributes"], never> => {
   if (isRef(resource)) {
     const metadata = getRefMetadata(resource);
-    return new RefExpr(
-      metadata.stack,
-      metadata.stage,
-      metadata.resourceId,
-    ) as any;
+    return new RefExpr(metadata.stack, metadata.stage, metadata.id) as any;
   }
   return new ResourceExpr(resource) as any;
 };
@@ -117,7 +113,10 @@ export const isResourceExpr = <Value = any, Req = any>(
 
 export class ResourceExpr<Value, Req = never> extends BaseExpr<Value, Req> {
   readonly kind = "ResourceExpr";
-  constructor(readonly stables?: Record<string, any>) {
+  constructor(
+    readonly src: ResourceLike,
+    readonly stables?: Record<string, any>,
+  ) {
     super();
     return proxy(this);
   }
@@ -332,7 +331,7 @@ export class InvalidReferenceError extends Data.TaggedError(
 export const evaluate: <A, Upstream extends ResourceLike, Req>(
   expr: Output<A, Req>,
   upstream: {
-    [Id in Upstream["id"]]: Extract<Upstream, { id: Id }>["attr"];
+    [Id in Upstream["LogicalId"]]: Extract<Upstream, { id: Id }>["Attributes"];
   },
 ) => Effect.Effect<
   A,
@@ -341,7 +340,7 @@ export const evaluate: <A, Upstream extends ResourceLike, Req>(
 > = (expr, upstream) =>
   Effect.gen(function* () {
     if (isResourceExpr(expr)) {
-      const srcId = expr.src.id;
+      const srcId = expr.src.LogicalId;
       const src = upstream[srcId as keyof typeof upstream];
       if (!src) {
         // type-safety should prevent this but let the caller decide how to handle it
@@ -366,7 +365,7 @@ export const evaluate: <A, Upstream extends ResourceLike, Req>(
       return (yield* evaluate(expr.expr, upstream))?.[expr.identifier];
     } else if (isRefExpr(expr)) {
       const state = yield* State.State;
-      const stack = expr.stack ?? (yield* StackName);
+      const stack = expr.stack ?? (yield* Stack).name;
       const stage = expr.stage ?? (yield* Stage);
       const resource = yield* state.get({
         stack,
@@ -399,12 +398,12 @@ export const evaluate: <A, Upstream extends ResourceLike, Req>(
   }) as Effect.Effect<any>;
 
 export const ref = <R extends ResourceLike>(
-  resourceId: R["id"],
+  resourceId: R["LogicalId"],
   options?: {
     stage?: string;
     stack?: string;
   },
-) => of(stageRef({ resourceId, ...options }));
+) => of(stageRef({ id: resourceId, ...options }));
 
 export const hasOutputs = (value: any): value is Output<any, any> =>
   Object.keys(upstreamAny(value)).length > 0;
@@ -434,7 +433,7 @@ export const upstreamAny = (
 export const upstream = <E extends Output<any, any>>(expr: E): any => {
   if (isResourceExpr(expr)) {
     return {
-      [expr.src.id]: expr.src,
+      [expr.src.LogicalId]: expr.src,
     };
   } else if (isPropExpr(expr)) {
     return upstream(expr.expr);
@@ -481,3 +480,24 @@ export const log = <A>(_value: A) =>
   Effect.gen(function* () {
     // TODO(sam): implement a log effect
   });
+
+export const toEnvKey = <const ID extends string, const Suffix extends string>(
+  id: ID,
+  suffix: Suffix,
+) => `${replace(toUpper(id))}_${replace(toUpper(suffix))}` as const;
+
+export const toUpper = <const S extends string>(str: S) =>
+  str.toUpperCase() as string extends S ? S : Uppercase<S>;
+
+const replace = <const S extends string>(str: S) =>
+  str.replace(/-/g, "_") as Replace<S>;
+
+type Replace<S extends string, Accum extends string = ""> = string extends S
+  ? S
+  : S extends ""
+    ? Accum
+    : S extends `${infer S}${infer Rest}`
+      ? S extends "-"
+        ? Replace<Rest, `${Accum}_`>
+        : Replace<Rest, `${Accum}${S}`>
+      : Accum;

@@ -29,7 +29,7 @@ export const S3BucketEventSource = Layer.effect(
         stream: Stream.Stream<BucketNotification, never, StreamReq>,
       ) => Effect.Effect<void, never, Req>,
     ) {
-      const queue = yield* Queue(`${bucket.id}-BucketEvents`);
+      const queue = yield* Queue(`${bucket.LogicalId}-BucketEvents`);
 
       yield* Policy({
         bucket,
@@ -76,7 +76,7 @@ export const S3BucketEventSourcePolicyLive = Layer.effect(
         queue.bind({
           policyStatements: [
             {
-              Sid: `AllowS3EventsFrom${bucket.id}`,
+              Sid: `AllowS3EventsFrom${bucket.LogicalId}`,
               Effect: "Allow",
               Action: ["sqs:SendMessage"],
               Resource: [queue.queueArn],

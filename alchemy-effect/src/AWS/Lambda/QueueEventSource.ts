@@ -75,7 +75,7 @@ export const QueueEventSourcePolicyLive = Layer.effect(
         ],
       });
 
-      yield* Mapping(`${queue.id}-EventSource`, {
+      yield* Mapping(`${queue.LogicalId}-EventSource`, {
         functionName: Function.functionName,
         eventSourceArn: queue.queueArn,
         batchSize: props.batchSize,

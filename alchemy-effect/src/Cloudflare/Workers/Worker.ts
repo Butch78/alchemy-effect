@@ -7,7 +7,7 @@ import * as ServiceMap from "effect/ServiceMap";
 import * as ESBuild from "../../Bundle/ESBuild.ts";
 import type { ScopedPlanStatusSession } from "../../Cli/index.ts";
 import { DotAlchemy } from "../../Config.ts";
-import type { FunctionExecutionContext } from "../../ExecutionContext.ts";
+import type { FunctionExecutionContext } from "../../Executable.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import { Resource } from "../../Resource.ts";
 import { sha256 } from "../../Util/sha256.ts";

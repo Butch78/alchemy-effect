@@ -62,7 +62,6 @@ export interface NetworkAclEntryProps {
 }
 
 export interface NetworkAclEntry extends Resource<
-  NetworkAclEntry,
   "AWS.EC2.NetworkAclEntry",
   NetworkAclEntryProps,
   {

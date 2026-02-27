@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as ServiceMap from "effect/ServiceMap";
 import { omit } from "effect/Struct";
-import type { Instance } from ".//Util/instance.ts";
 import { asEffect } from ".//Util/types.ts";
 import type { NoopDiff, UpdateDiff } from "./Diff.ts";
 import { InstanceId } from "./InstanceId.ts";
@@ -64,7 +63,7 @@ export interface Create<
   R extends ResourceLike = ResourceLike,
 > extends BaseNode<R> {
   action: "create";
-  props: R["props"];
+  props: R["Props"];
   bindings: R["binding"][];
   state: CreatingResourceState | undefined;
 }
@@ -73,7 +72,7 @@ export interface Update<
   R extends ResourceLike = ResourceLike,
 > extends BaseNode<R> {
   action: "update";
-  props: R["props"];
+  props: R["Props"];
   state:
     | CreatedResourceState
     | UpdatedResourceState
@@ -113,38 +112,18 @@ export interface Replace<
     | ReplacedResourceState;
 }
 
-export type ResourceGraph<Resources extends ResourceLike> = ToGraph<
-  TraverseResources<Resources>
->;
-
-export type DerivePlan<Resources extends ResourceLike> = {
-  resources: {
-    [ID in keyof ResourceGraph<Resources>]: ResourceGraph<Resources>[ID];
-  };
-  deletions: {
-    [ID in string]: Delete<Resource>;
-  };
-};
-
-export type IPlan = {
+export type Plan = {
   resources: {
     [id in string]: Apply<any>;
   };
   deletions: {
-    [id in string]?: Delete<Resource>;
+    [id in string]?: Delete<ResourceLike>;
   };
 };
 
-export type Plan<Resources extends ResourceLike> = Effect.Effect<
-  DerivePlan<Resources>,
-  | CannotReplacePartiallyReplacedResource
-  | DeleteResourceHasDownstreamDependencies,
-  Providers<Resources> | State
->;
-
 export const plan = <const Resources extends Resource[]>(
   ..._resources: Resources
-): Plan<Instance<Resources[number]>> =>
+): Plan =>
   Effect.gen(function* () {
     const state = yield* State;
 
@@ -152,11 +131,11 @@ export const plan = <const Resources extends Resource[]>(
       resource: Resource,
       visited: Set<string>,
     ): Resource[] => {
-      if (visited.has(resource.id)) {
+      if (visited.has(resource.LogicalId)) {
         return [];
       }
-      visited.add(resource.id);
-      const upstream = Object.values(Output.upstreamAny(resource.props));
+      visited.add(resource.LogicalId);
+      const upstream = Object.values(Output.upstreamAny(resource.Props));
       return [
         resource,
         ...upstream,
@@ -165,7 +144,10 @@ export const plan = <const Resources extends Resource[]>(
     };
     const resources = _resources
       .flatMap((r) => findResources(r, new Set()))
-      .filter((r, i, arr) => arr.findIndex((r2) => r2.id === r.id) === i);
+      .filter(
+        (r, i, arr) =>
+          arr.findIndex((r2) => r2.LogicalId === r.LogicalId) === i,
+      );
 
     // TODO(sam): rename terminology to Stack
     const stackName = yield* StackName;
@@ -185,39 +167,39 @@ export const plan = <const Resources extends Resource[]>(
     type ResolveEffect<T> = Effect.Effect<T, ResolveErr, ResolveReq>;
     type ResolveErr = StateStoreError;
     type ResolveReq =
-      | ServiceMap.ServiceClass<
-          Provider<Resource<string, string, any, any>>,
-          string,
-          ProviderService<Resource<string, string, any, any>>
-        >
+      | ServiceMap.ServiceClass<Provider, string, ProviderService>
       | State;
 
     const resolvedResources: Record<
       string,
-      ResolveEffect<
+      Effect.Effect<
         | {
             [attr in string]: any;
           }
-        | undefined
+        | undefined,
+        any,
+        any
       >
     > = {};
 
-    const resolveResource = (
-      resourceExpr: Output.ResourceExpr<any, any, any>,
-    ) =>
+    const resolveResource = (resourceExpr: Output.ResourceExpr<any, any>) =>
       Effect.gen(function* () {
-        return yield* (resolvedResources[resourceExpr.src.id] ??=
+        return yield* (resolvedResources[resourceExpr.src.LogicalId] ??=
           yield* Effect.cached(
             Effect.gen(function* () {
               const resource = resourceExpr.src as Resource & {
-                provider: ResourceTags<Resource<string, string, any, any>>;
+                provider: ServiceMap.ServiceClass<
+                  Provider,
+                  string,
+                  ProviderService
+                >;
               };
-              const provider = yield* resource.provider.tag;
-              const props = yield* resolveInput(resource.props);
+              const provider = yield* resource.provider;
+              const props = yield* resolveInput(resource.Props);
               const oldState = yield* state.get({
                 stack: stackName,
                 stage: stage,
-                resourceId: resource.id,
+                resourceId: resource.LogicalId,
               });
 
               if (!oldState || oldState.status === "creating") {
@@ -240,7 +222,7 @@ export const plan = <const Resources extends Resource[]>(
               const diff = yield* provider.diff
                 ? provider
                     .diff({
-                      id: resource.id,
+                      id: resource.LogicalId,
                       olds: oldProps,
                       instanceId: oldState.instanceId,
                       news: props,
@@ -352,11 +334,13 @@ export const plan = <const Resources extends Resource[]>(
       [resourceId: string]: string[];
     } = Object.fromEntries(
       resources.map((resource) => [
-        resource.id,
+        resource.LogicalId,
         [
-          ...Object.values(Output.upstreamAny(resource.props)).map((r) => r.id),
+          ...Object.values(Output.upstreamAny(resource.Props)).map(
+            (r) => r.LogicalId,
+          ),
           ...(isService(resource)
-            ? resource.props.bindings.capabilities.map((cap) => cap.resource.id)
+            ? resource.Props.bindings.capabilities.map((cap) => cap.resource.id)
             : []),
         ],
       ]),
@@ -366,9 +350,9 @@ export const plan = <const Resources extends Resource[]>(
       [resourceId: string]: string[];
     } = Object.fromEntries(
       resources.map((resource) => [
-        resource.id,
+        resource.LogicalId,
         Object.entries(newUpstreamDependencies)
-          .filter(([_, downstream]) => downstream.includes(resource.id))
+          .filter(([_, downstream]) => downstream.includes(resource.LogicalId))
           .map(([id]) => id),
       ]),
     );
@@ -378,11 +362,11 @@ export const plan = <const Resources extends Resource[]>(
         resources
           .flatMap((resource) => [
             ...(isService(resource)
-              ? resource.props.bindings.capabilities.map(
+              ? resource.Props.bindings.capabilities.map(
                   (cap: Capability) => cap.resource as Resource,
                 )
               : []),
-            ...Object.values(Output.upstreamAny(resource.props)),
+            ...Object.values(Output.upstreamAny(resource.Props)),
             resource,
           ])
           .filter(
@@ -394,7 +378,7 @@ export const plan = <const Resources extends Resource[]>(
               const resource = node as Resource & {
                 provider: ResourceTags<Resource<string, string, any, any>>;
               };
-              const news = yield* resolveInput(resource.props);
+              const news = yield* resolveInput(resource.Props);
 
               const oldState = yield* state.get({
                 stack: stackName,
@@ -638,8 +622,8 @@ export const plan = <const Resources extends Resource[]>(
             }),
           ),
         { concurrency: "unbounded" },
-      )).map((update) => [update.resource.id, update]),
-    ) as IPlan["resources"];
+      )).map((update) => [update.resource.LogicalId, update]),
+    ) as Plan["resources"];
 
     const deletions = Object.fromEntries(
       (yield* Effect.all(
@@ -682,10 +666,10 @@ export const plan = <const Resources extends Resource[]>(
                   bindings: [],
                   provider,
                   resource: {
-                    id: id,
-                    type: oldState.resourceType,
+                    LogicalId: id,
+                    Type: oldState.resourceType,
                     attr,
-                    props: oldState.props,
+                    Props: oldState.props,
                   } as Resource,
                   // TODO(sam): is it enough to just pass through oldState?
                   downstream: oldDownstreamDependencies[id] ?? [],
@@ -716,7 +700,7 @@ export const plan = <const Resources extends Resource[]>(
     return {
       resources: resourceGraph,
       deletions,
-    } satisfies IPlan as IPlan;
+    } satisfies Plan;
   }) as any;
 
 export class CannotReplacePartiallyReplacedResource extends Data.TaggedError(
@@ -745,8 +729,8 @@ export class DeleteResourceHasDownstreamDependencies extends Data.TaggedError(
 }> {}
 
 const arePropsChanged = <R extends ResourceLike>(
-  oldProps: R["props"] | undefined,
-  newProps: R["props"],
+  oldProps: R["Props"] | undefined,
+  newProps: R["Props"],
 ) => {
   return (
     Output.hasOutputs(newProps) ||
@@ -761,7 +745,7 @@ const arePropsChanged = <R extends ResourceLike>(
 /**
  * Print a plan in a human-readable format that shows the graph topology.
  */
-export const printPlan = (plan: IPlan): string => {
+export const printPlan = (plan: Plan): string => {
   const lines: string[] = [];
   const allNodes = { ...plan.resources, ...plan.deletions };
 
@@ -844,7 +828,7 @@ export const printPlan = (plan: IPlan): string => {
   const deletionIds = Object.keys(plan.deletions).sort();
   for (const id of deletionIds) {
     const node = plan.deletions[id]!;
-    const type = node.resource?.type ?? "unknown";
+    const type = node.resource?.Type ?? "unknown";
     const downstream = node.state.downstream?.length
       ? ` → [${node.state.downstream.join(", ")}]`
       : "";

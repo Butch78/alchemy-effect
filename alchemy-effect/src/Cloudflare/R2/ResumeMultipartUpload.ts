@@ -47,7 +47,9 @@ export const ResumeMultipartUploadLive = Layer.effect(
 
     return Effect.fn(function* (bucket: Bucket) {
       yield* Policy(bucket);
-      const r2Bucket = (env as Record<string, runtime.R2Bucket>)[bucket.id];
+      const r2Bucket = (env as Record<string, runtime.R2Bucket>)[
+        bucket.LogicalId
+      ];
 
       return Effect.fn(function* (key: string, uploadId: string) {
         const multipartUpload = r2Bucket.resumeMultipartUpload(key, uploadId);

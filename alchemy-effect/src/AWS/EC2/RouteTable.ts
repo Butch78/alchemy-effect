@@ -33,7 +33,6 @@ export interface RouteTableProps {
 }
 
 export interface RouteTable extends Resource<
-  RouteTable,
   "AWS.EC2.RouteTable",
   RouteTableProps,
   {

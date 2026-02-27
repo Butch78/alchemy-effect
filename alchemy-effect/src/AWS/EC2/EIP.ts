@@ -51,7 +51,6 @@ export interface EIPProps {
 }
 
 export interface EIP extends Resource<
-  EIP,
   "AWS.EC2.EIP",
   EIPProps,
   {
@@ -147,7 +146,7 @@ export const EIPProvider = () =>
             customerOwnedIp: address.CustomerOwnedIp,
             customerOwnedIpv4Pool: address.CustomerOwnedIpv4Pool,
             carrierIp: address.CarrierIp,
-          } satisfies EIP["attr"];
+          } satisfies EIP["Attributes"];
         }),
 
         diff: Effect.fn(function* ({ news, olds }) {
@@ -193,7 +192,7 @@ export const EIPProvider = () =>
             customerOwnedIp: result.CustomerOwnedIp,
             customerOwnedIpv4Pool: result.CustomerOwnedIpv4Pool,
             carrierIp: result.CarrierIp,
-          } satisfies EIP["attr"];
+          } satisfies EIP["Attributes"];
         }),
 
         update: Effect.fn(function* ({ id, news, output, session }) {

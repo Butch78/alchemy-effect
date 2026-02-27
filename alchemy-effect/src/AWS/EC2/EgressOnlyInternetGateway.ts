@@ -35,7 +35,6 @@ export interface EgressOnlyInternetGatewayProps {
 }
 
 export interface EgressOnlyInternetGateway extends Resource<
-  EgressOnlyInternetGateway,
   "AWS.EC2.EgressOnlyInternetGateway",
   EgressOnlyInternetGatewayProps,
   {
@@ -103,9 +102,7 @@ export const EgressOnlyInternetGatewayProvider = () =>
             ),
           );
 
-      const toAttrs = (
-        gw: ec2.EgressOnlyInternetGateway,
-      ) => ({
+      const toAttrs = (gw: ec2.EgressOnlyInternetGateway) => ({
         egressOnlyInternetGatewayId:
           gw.EgressOnlyInternetGatewayId as EgressOnlyInternetGatewayId,
         egressOnlyInternetGatewayArn:

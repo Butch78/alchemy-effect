@@ -1,5 +1,45 @@
 import * as Effect from "effect/Effect";
 import * as ServiceMap from "effect/ServiceMap";
+import type { PolicyLike } from "./Binding.ts";
+import type { Provider } from "./Provider.ts";
+import {
+  Resource,
+  type ResourceLike,
+  type ResourceProviders,
+} from "./Resource.ts";
+import type { Stack } from "./Stack.ts";
+import type { Stage } from "./Stage.ts";
+
+type ExecutableServices = Provider<any> | PolicyLike | Stack | Stage;
+
+export type ExecutableConstructor<
+  R extends ResourceLike,
+  Provided,
+  Req = never,
+> = {
+  (
+    id: string,
+    eff: Effect.Effect<R["Props"], never, Req | ExecutableServices>,
+  ): Effect.Effect<R, never, Exclude<Req, Provided>>;
+  (
+    id: string,
+  ): (
+    eff: Effect.Effect<R["Props"], never, Req | ExecutableServices>,
+  ) => Effect.Effect<R, never, Exclude<Req, Provided>>;
+};
+
+export type ExecutableClass<
+  Self extends ResourceLike,
+  Provided,
+> = ExecutableConstructor<Self, Provider<Self>, Provided> &
+  Effect.Effect<ExecutableConstructor<Self, Provided>> & {
+    provider: ResourceProviders<Self>;
+  };
+
+export const Executable = <R extends ResourceLike, Provided>(
+  type: R["Type"],
+): ExecutableClass<R, Provided> =>
+  Resource(type) as any as ExecutableClass<R, Provided>;
 
 export class ExecutionContext extends ServiceMap.Service<
   ExecutionContext,

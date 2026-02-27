@@ -37,7 +37,6 @@ export interface RouteTableAssociationProps {
 }
 
 export interface RouteTableAssociation extends Resource<
-  RouteTableAssociation,
   "AWS.EC2.RouteTableAssociation",
   RouteTableAssociationProps,
   {

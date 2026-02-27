@@ -21,7 +21,6 @@ export type StreamArn =
   `arn:aws:kinesis:${RegionID}:${AccountID}:stream/${StreamName}`;
 
 export interface Stream extends Resource<
-  Stream,
   "AWS.Kinesis.Stream",
   StreamProps,
   {

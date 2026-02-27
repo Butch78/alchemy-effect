@@ -1,7 +1,7 @@
 import * as DynamoDB from "@/aws/dynamodb";
 import * as Lambda from "@/aws/lambda";
 import * as SQS from "@/aws/sqs";
-import { $, type } from "@/index";
+import { $ } from "@/index";
 import * as Effect from "effect/Effect";
 import * as S from "effect/Schema";
 import path from "pathe";
@@ -11,13 +11,9 @@ const main = path.resolve(import.meta.dirname, "..", "..", "handler.ts");
 // TODO(sam): set up attest
 class Table extends DynamoDB.Table("Table", {
   tableName: "test",
-  items: type<{ id: string; sk: string }>,
-  attributes: {
-    id: S.String,
-    sk: S.String,
-  },
   partitionKey: "id",
   sortKey: "sk",
+  attributes: { id: "S", sk: "S" },
 }) {}
 class Queue extends SQS.Queue("Queue", {
   queueName: "test",

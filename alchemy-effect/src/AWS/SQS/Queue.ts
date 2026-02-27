@@ -4,9 +4,14 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource } from "../../Resource.ts";
-import { Account } from "../Account.ts";
+import { Resource, type ResourceBinding } from "../../Resource.ts";
+import { Account, type AccountID } from "../Account.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
+import type { RegionID } from "../Region.ts";
+
+export type QueueName = string;
+export type QueueArn = `arn:aws:sqs:${RegionID}:${AccountID}:${QueueName}`;
+export type QueueUrl = string;
 
 export type QueueProps = {
   /**
@@ -67,13 +72,12 @@ export type QueueProps = {
 );
 
 export interface Queue extends Resource<
-  Queue,
   "AWS.SQS.Queue",
   QueueProps,
   {
-    queueName: string;
     queueUrl: string;
-    queueArn: `arn:aws:sqs:${string}:${string}:${string}`;
+    queueName: QueueName;
+    queueArn: QueueArn;
   },
   {
     policyStatements: PolicyStatement[];
@@ -106,7 +110,7 @@ export const QueueProvider = () =>
         });
       const createAttributes = (
         props: QueueProps,
-        bindings: Queue["binding"][],
+        bindings: ResourceBinding<Queue>[],
       ) => {
         const baseAttributes: Record<string, string | undefined> = {
           DelaySeconds: props.delaySeconds?.toString(),

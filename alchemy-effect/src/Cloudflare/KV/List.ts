@@ -28,7 +28,7 @@ export const ListLive = Layer.effect(
     return Effect.fn(function* (namespace: Namespace) {
       yield* Policy(namespace);
       const kvNamespace = (env as Record<string, runtime.KVNamespace>)[
-        namespace.id
+        namespace.LogicalId
       ];
 
       return <Metadata = unknown>(options?: ListOptions) =>
@@ -42,7 +42,4 @@ export class ListPolicy extends Binding.Policy<
   (namespace: Namespace) => Effect.Effect<void>
 >()("Cloudflare.KV.List") {}
 
-export const ListPolicyLive = Layer.effect(
-  ListPolicy,
-  NamespaceBinding,
-);
+export const ListPolicyLive = Layer.effect(ListPolicy, NamespaceBinding);

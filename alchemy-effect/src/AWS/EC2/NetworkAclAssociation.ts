@@ -27,7 +27,6 @@ export interface NetworkAclAssociationProps {
 }
 
 export interface NetworkAclAssociation extends Resource<
-  NetworkAclAssociation,
   "AWS.EC2.NetworkAclAssociation",
   NetworkAclAssociationProps,
   {

@@ -93,7 +93,6 @@ export interface VpcProps {
 }
 
 export interface Vpc extends Resource<
-  Vpc,
   "AWS.EC2.VPC",
   VpcProps,
   {

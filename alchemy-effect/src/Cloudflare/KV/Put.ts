@@ -35,7 +35,7 @@ export const PutLive = Layer.effect(
     return Effect.fn(function* (namespace: Namespace) {
       yield* Policy(namespace);
       const kvNamespace = (env as Record<string, runtime.KVNamespace>)[
-        namespace.id
+        namespace.LogicalId
       ];
 
       return Effect.fn(function* (
@@ -56,7 +56,4 @@ export class PutPolicy extends Binding.Policy<
   (namespace: Namespace) => Effect.Effect<void>
 >()("Cloudflare.KV.Put") {}
 
-export const PutPolicyLive = Layer.effect(
-  PutPolicy,
-  NamespaceBinding,
-);
+export const PutPolicyLive = Layer.effect(PutPolicy, NamespaceBinding);

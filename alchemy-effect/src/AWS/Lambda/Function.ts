@@ -13,13 +13,14 @@ import type { Scope } from "effect/Scope";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { ESBuild } from "../../Bundle/index.ts";
 import { DotAlchemy } from "../../Config.ts";
-import type {
-  ExecutionContext,
-  FunctionExecutionContext,
-} from "../../ExecutionContext.ts";
+import {
+  Executable,
+  type ExecutionContext,
+  type FunctionExecutionContext,
+} from "../../Executable.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource, RuntimeResource } from "../../Resource.ts";
-import { StackName } from "../../Stack.ts";
+import { Resource } from "../../Resource.ts";
+import { Stack } from "../../Stack.ts";
 import { Stage } from "../../Stage.ts";
 import { createInternalTags, createTagsList, hasTags } from "../../Tags.ts";
 import { sha256 } from "../../Util/sha256.ts";
@@ -62,7 +63,6 @@ export interface Function
   extends
     FunctionExecutionContext<"AWS.Lambda.Function">,
     Resource<
-      Function,
       "AWS.Lambda.Function",
       FunctionProps,
       {
@@ -81,15 +81,13 @@ export interface Function
       }
     > {}
 
-export const Function = RuntimeResource<Function, Provided>(
-  "AWS.Lambda.Function",
-);
+export const Function = Executable<Function, Provided>("AWS.Lambda.Function");
 
 export const FunctionProvider = () =>
   Function.provider.effect(
     // @ts-expect-error
     Effect.gen(function* () {
-      const stackName = yield* StackName;
+      const stack = yield* Stack;
       const stage = yield* Stage;
       const accountId = yield* Account;
       const region = yield* Region;
@@ -140,7 +138,7 @@ export const FunctionProvider = () =>
         policyName: string;
         functionArn: string;
         functionName: string;
-        bindings: Function["binding"][];
+        bindings: Function["Binding"][];
       }) {
         const env = bindings
           .map((binding) => binding?.env)
@@ -248,7 +246,7 @@ export const FunctionProvider = () =>
         const outfile = path.join(
           dotAlchemy,
           "out",
-          `${stackName}-${stage}-${id}.ts`,
+          `${stack.name}-${stage}-${id}.ts`,
         );
         yield* esbuild.build({
           // entryPoints: [props.main],

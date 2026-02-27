@@ -28,7 +28,9 @@ export const GetObjectLive = Layer.effect(
 
     return Effect.fn(function* (bucket: Bucket) {
       yield* Policy(bucket);
-      const r2Bucket = (env as Record<string, runtime.R2Bucket>)[bucket.id];
+      const r2Bucket = (env as Record<string, runtime.R2Bucket>)[
+        bucket.LogicalId
+      ];
 
       return Effect.fn(function* (key: string, options?: GetObjectOptions) {
         return yield* Effect.promise(() => r2Bucket.get(key, options));

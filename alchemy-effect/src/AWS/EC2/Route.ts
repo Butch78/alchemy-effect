@@ -97,7 +97,6 @@ export interface RouteProps {
 }
 
 export interface Route extends Resource<
-  Route,
   "AWS.EC2.Route",
   RouteProps,
   {

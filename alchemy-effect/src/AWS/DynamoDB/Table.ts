@@ -5,18 +5,14 @@ import type { TimeToLiveSpecification } from "distilled-aws/dynamodb";
 import * as dynamodb from "distilled-aws/dynamodb";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
-import * as S from "effect/Schema";
 
 import type { Input } from "../../Input.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import { Resource } from "../../Resource.ts";
-import { StackName } from "../../Stack.ts";
-import { Stage } from "../../Stage.ts";
+import { Stack } from "../../Stack.ts";
 import { createInternalTags, hasTags } from "../../Tags.ts";
-import type { type } from "../../Util/index.ts";
 import type { AccountID } from "../Account.ts";
 import type { RegionID } from "../Region.ts";
-import { isScalarAttributeType, toAttributeType } from "./AttributeValue.ts";
 
 export type TableName = string;
 
@@ -34,18 +30,13 @@ export type TableEvent<Data> = Omit<lambda.DynamoDBStreamEvent, "Records"> & {
   Records: TableRecord<Data>[];
 };
 
-export interface TableProps<
-  Items extends any = any,
-  Attributes extends AttributesSchema<Items, PartitionKey, SortKey> =
-    AttributesSchema<Items, keyof Items, keyof Items | undefined>,
-  PartitionKey extends keyof Items = keyof Items,
-  SortKey extends keyof Items | undefined = keyof Items | undefined,
-> {
-  items: type<Items>;
-  attributes: Attributes;
-  partitionKey: PartitionKey;
-  sortKey?: SortKey;
-  tableName?: string | undefined;
+export type ScalarAttributeType = "S" | "N" | "B";
+
+export type TableProps = {
+  tableName?: string;
+  partitionKey: string;
+  sortKey?: string;
+  attributes: Record<string, ScalarAttributeType>;
   billingMode?: DynamoDB.BillingMode;
   deletionProtectionEnabled?: boolean;
   onDemandThroughput?: DynamoDB.OnDemandThroughput;
@@ -54,30 +45,11 @@ export interface TableProps<
   timeToLiveSpecification?: DynamoDB.TimeToLiveSpecification;
   warmThroughput?: DynamoDB.WarmThroughput;
   tableClass?: DynamoDB.TableClass;
-}
-
-export type AttributesSchema<
-  Items,
-  PartitionKey extends keyof Items,
-  SortKey extends keyof Items | undefined,
-> = {
-  [k in PartitionKey | (SortKey extends undefined ? never : SortKey)]: S.Schema<
-    ToAttribute<Items[k]>
-  >;
 };
 
-export type ToAttribute<S> = S extends string
-  ? string
-  : S extends number
-    ? number
-    : S extends Uint8Array | Buffer | File | Blob
-      ? Uint8Array
-      : S;
-
 export interface Table extends Resource<
-  Table,
   "AWS.DynamoDB.Table",
-  TableProps<any, any, any, any>,
+  TableProps,
   {
     tableId: string;
     tableName: TableName;
@@ -89,28 +61,10 @@ export interface Table extends Resource<
 
 export const Table = Resource<Table>("AWS.DynamoDB.Table");
 
-export interface AnyTable extends Table {}
-
-export declare namespace Table {
-  export type PartitionKey<T extends Table> = T["props"]["partitionKey"];
-  export type SortKey<T extends Table> = T["props"]["sortKey"];
-  export type Items<T extends Table> = T["props"]["items"];
-  export type Key<T extends Table> = {
-    [K in PartitionKey<T>]: InstanceType<T["props"]["items"]>[K];
-  } & {
-    [K in Exclude<SortKey<T>, undefined>]: Exclude<
-      InstanceType<T["props"]["items"]>[K],
-      undefined
-    >;
-  };
-}
-
-// we add an explict type to simplify the Layer type errors because the Table interface has a lot of type args
 export const TableProvider = () =>
   Table.provider.effect(
     Effect.gen(function* () {
-      const stackName = yield* StackName;
-      const stage = yield* Stage;
+      const stack = yield* Stack;
 
       const createTableName = (
         id: string,
@@ -129,13 +83,13 @@ export const TableProvider = () =>
 
       const toKeySchema = (props: Input.ResolveProps<TableProps>) => [
         {
-          AttributeName: props.partitionKey as string,
+          AttributeName: props.partitionKey,
           KeyType: "HASH" as const,
         },
         ...(props.sortKey
           ? [
               {
-                AttributeName: props.sortKey as string,
+                AttributeName: props.sortKey,
                 KeyType: "RANGE" as const,
               },
             ]
@@ -143,33 +97,14 @@ export const TableProvider = () =>
       ];
 
       const toAttributeDefinitions = (
-        attributes: AttributesSchema<any, any, any>,
+        attrs: Record<string, ScalarAttributeType>,
       ) =>
-        Object.entries(attributes)
-          .flatMap(([name, schema]) => {
-            const type = toAttributeType(schema);
-            if (isScalarAttributeType(type)) {
-              // only scalars can be included in the attribute definitions
-              return [
-                {
-                  AttributeName: name,
-                  AttributeType: type,
-                } as const,
-              ];
-            } else {
-              return [];
-            }
-          })
+        Object.entries(attrs)
+          .map(([name, type]) => ({
+            AttributeName: name,
+            AttributeType: type,
+          }))
           .sort((a, b) => a.AttributeName.localeCompare(b.AttributeName));
-
-      const toAttributeDefinitionsMap = (
-        attributes: AttributesSchema<any, any, any>,
-      ) =>
-        Object.fromEntries(
-          toAttributeDefinitions(attributes).map(
-            (def) => [def.AttributeName, def.AttributeType] as const,
-          ),
-        );
 
       const resolveTableIfOwned = (id: string, tableName: string) =>
         // if it already exists, let's see if it contains tags indicating we (this app+stage) owns it
@@ -224,11 +159,8 @@ export const TableProvider = () =>
           ) {
             return { action: "replace" } as const;
           }
-          const oldAttrs = toAttributeDefinitionsMap(olds.attributes);
-          const newAttrs = toAttributeDefinitionsMap(news.attributes);
-          for (const [name, type] of Object.entries(oldAttrs)) {
-            // CloudFormation requires that editing an existing AttributeDefinition is a replace
-            if (newAttrs[name] !== type) {
+          for (const [name, type] of Object.entries(olds.attributes)) {
+            if (news.attributes[name] !== type) {
               return { action: "replace" } as const;
             }
           }
@@ -252,14 +184,9 @@ export const TableProvider = () =>
               DeletionProtectionEnabled: news.deletionProtectionEnabled,
               OnDemandThroughput: news.onDemandThroughput,
               ProvisionedThroughput: news.provisionedThroughput,
-              // ResourcePolicy: (this should be determined by bindings maybe?)
-
-              // TODO(sam): this should come from Lambda.consume ?
-              // TODO(sam): that would require Lambda.consume mutates the Table declaration?
-              // StreamSpecification: news.streamSpecification,
               Tags: [
-                { Key: "alchemy::stack", Value: stackName },
-                { Key: "alchemy::stage", Value: stage },
+                { Key: "alchemy::stack", Value: stack.name },
+                { Key: "alchemy::stage", Value: stack.stage },
                 { Key: "alchemy::id", Value: id },
               ],
             })

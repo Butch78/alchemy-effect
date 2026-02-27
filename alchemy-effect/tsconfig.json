@@ -7,9 +7,6 @@
     "src/**/*.json"
   ],
   "compilerOptions": {
-    "types": [
-      "./src/global.d.ts"
-    ],
     "composite": true,
     "noEmit": false,
     "outDir": "./lib",

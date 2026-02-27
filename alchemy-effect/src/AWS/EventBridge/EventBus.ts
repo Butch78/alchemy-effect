@@ -98,7 +98,6 @@ export interface EventBusProps {
  * ```
  */
 export interface EventBus extends Resource<
-  EventBus,
   "AWS.EventBridge.EventBus",
   EventBusProps,
   {

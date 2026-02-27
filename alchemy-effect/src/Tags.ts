@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import { StackName } from "./Stack.ts";
+import { Stack } from "./Stack.ts";
 import { Stage } from "./Stage.ts";
 
 export type Tags =
@@ -32,10 +32,10 @@ export const createTagsList = (tags: Tags) =>
     }));
 
 export const createInternalTags = Effect.fn(function* (id: string) {
-  const stackName = yield* StackName;
+  const stack = yield* Stack;
   const stage = yield* Stage;
   return {
-    "alchemy::stack": stackName,
+    "alchemy::stack": stack.name,
     "alchemy::stage": stage,
     "alchemy::id": id,
   };
@@ -46,10 +46,10 @@ export const createInternalTags = Effect.fn(function* (id: string) {
  * Use with AWS describe APIs that accept Filter parameters.
  */
 export const createAlchemyTagFilters = Effect.fn(function* (id: string) {
-  const stackName = yield* StackName;
+  const stack = yield* Stack;
   const stage = yield* Stage;
   return [
-    { Name: "tag:alchemy::stack", Values: [stackName] },
+    { Name: "tag:alchemy::stack", Values: [stack.name] },
     { Name: "tag:alchemy::stage", Values: [stage] },
     { Name: "tag:alchemy::id", Values: [id] },
   ];
@@ -62,10 +62,10 @@ export const hasAlchemyTags = Effect.fn(function* (
   id: string,
   tags: Tags | undefined,
 ) {
-  const stackName = yield* StackName;
+  const stack = yield* Stack;
   const stage = yield* Stage;
   const expectedTags = {
-    "alchemy::stack": stackName,
+    "alchemy::stack": stack.name,
     "alchemy::stage": stage,
     "alchemy::id": id,
   };

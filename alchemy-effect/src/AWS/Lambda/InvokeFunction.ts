@@ -2,10 +2,10 @@ import * as Lambda from "distilled-aws/lambda";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Binding from "../../Binding.ts";
-import { ExecutionContext } from "../../ExecutionContext.ts";
+import { ExecutionContext } from "../../Executable.ts";
 import * as Output from "../../Output.ts";
-import * as LambdaModule from "./index.ts";
 import type { Function } from "./Function.ts";
+import * as LambdaModule from "./index.ts";
 
 export interface InvokeFunctionRequest extends Omit<
   Lambda.InvocationRequest,
