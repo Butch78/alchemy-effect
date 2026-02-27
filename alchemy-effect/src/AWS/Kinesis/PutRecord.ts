@@ -16,20 +16,24 @@ export class PutRecord extends Binding.Service<
   PutRecord,
   (
     stream: Stream,
-  ) => Effect.Effect<(request: PutRecordRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (
+      request: PutRecordRequest,
+    ) => Effect.Effect<Kinesis.PutRecordOutput, Kinesis.PutRecordError>
+  >
 >()("AWS.Kinesis.PutRecord") {}
 
 export const PutRecordLive = Layer.effect(
   PutRecord,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* PutRecordPolicy;
+    const putRecord = yield* Kinesis.putRecord;
 
     return Effect.fn(function* (stream: Stream) {
       const StreamName = yield* stream.streamName;
       yield* Policy(stream);
       return Effect.fn(function* (request: PutRecordRequest) {
-        return yield* Kinesis.putRecord({
+        return yield* putRecord({
           ...request,
           StreamName: yield* StreamName,
         });

@@ -1,10 +1,10 @@
 import type lambda from "aws-lambda";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as ServiceMap from "effect/ServiceMap";
 import * as Stream from "effect/Stream";
-import type { Bucket } from "../S3/Bucket.ts";
 
+import * as Binding from "../../Binding.ts";
+import type { Bucket } from "../S3/Bucket.ts";
 import * as S3 from "../S3/index.ts";
 import * as Lambda from "./index.ts";
 
@@ -67,7 +67,7 @@ const isS3Event = (event: any): event is lambda.S3Event =>
   Array.isArray(event.Records) &&
   event.Records.some((record: any) => record.s3);
 
-export class BucketEventSourcePolicy extends ServiceMap.Service<
+export class BucketEventSourcePolicy extends Binding.Policy<
   BucketEventSourcePolicy,
   (
     bucket: S3.Bucket,

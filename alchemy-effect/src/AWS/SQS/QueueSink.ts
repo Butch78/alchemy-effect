@@ -1,50 +1,67 @@
-import * as SQS from "distilled-aws/sqs";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
-
 import * as Binding from "../../Binding.ts";
 import { ExecutionContext } from "../../ExecutionContext.ts";
 import * as Output from "../../Output.ts";
-import * as AWS from "../index.ts";
 import * as Lambda from "../Lambda/index.ts";
 import type { Queue } from "./Queue.ts";
+import { SendMessageBatch } from "./SendMessageBatch.ts";
 
-export const sink = Effect.fn(function* <Q extends Queue>(queue: Q) {
-  yield* Binding.fn<QueueSink>("AWS.SQS.QueueSink")(queue);
-  const QueueUrl = yield* queue.queueUrl;
-  const Context = yield* AWS.context();
-  return Sink.forEachArray((messages: readonly string[]) =>
-    Effect.gen(function* () {
-      yield* SQS.sendMessageBatch({
-        QueueUrl: yield* QueueUrl,
-        Entries: messages.map((message, i) => ({
-          Id: `${i}`,
-          MessageBody: message,
-        })),
-      });
-      // TODO(sam): handle errors, re-drive failed messages
-    }).pipe(Effect.provide(Context), Effect.orDie),
-  );
-});
+export class QueueSink extends Binding.Service<
+  QueueSink,
+  (
+    queue: Queue,
+  ) => Effect.Effect<Sink.Sink<void, string, readonly string[], never>>
+>()("AWS.SQS.QueueSink") {}
 
-export class QueueSink extends Binding.Service(
-  "AWS.SQS.QueueSink",
-  Effect.fn(function* (queue: Queue) {
-    const ctx = yield* ExecutionContext;
-    if (Lambda.isFunction(ctx)) {
-      yield* ctx.bind({
-        policyStatements: [
-          {
-            Sid: "QueueSink",
-            Effect: "Allow",
-            Action: ["sqs:SendMessageBatch"],
-            Resource: [Output.interpolate`${queue.queueArn}`],
-          },
-        ],
-      });
-    }
-    return yield* Effect.die(
-      `QueueSinkBinding does not support runtime '${ctx.type}'`,
-    );
+export const QueueSinkLive = Layer.effect(
+  QueueSink,
+  Effect.gen(function* () {
+    const Policy = yield* QueueSinkPolicy;
+    const sendMessageBatch = yield* SendMessageBatch;
+
+    return Effect.fn(function* (queue: Queue) {
+      yield* Policy(queue);
+      const sendBatch = yield* sendMessageBatch(queue);
+      return Sink.forEachArray((messages: readonly string[]) =>
+        sendBatch({
+          Entries: messages.map((message, i) => ({
+            Id: `${i}`,
+            MessageBody: message,
+          })),
+        }).pipe(Effect.orDie, Effect.asVoid),
+      );
+    });
   }),
-) {}
+);
+
+export class QueueSinkPolicy extends Binding.Policy<
+  QueueSinkPolicy,
+  (queue: Queue) => Effect.Effect<void>
+>()("AWS.SQS.QueueSinkPolicy") {}
+
+export const QueueSinkPolicyLive = Layer.effect(
+  QueueSinkPolicy,
+  Effect.gen(function* () {
+    const ctx = yield* ExecutionContext;
+    return Effect.fn(function* (queue: Queue) {
+      if (Lambda.isFunction(ctx)) {
+        return yield* ctx.bind({
+          policyStatements: [
+            {
+              Sid: "QueueSink",
+              Effect: "Allow",
+              Action: ["sqs:SendMessage"],
+              Resource: [Output.interpolate`${queue.queueArn}`],
+            },
+          ],
+        });
+      } else {
+        return yield* Effect.die(
+          `QueueSinkPolicy does not support runtime '${ctx.type}'`,
+        );
+      }
+    });
+  }),
+);

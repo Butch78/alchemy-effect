@@ -17,21 +17,26 @@ export class DeleteMessageBatch extends Binding.Service<
   (
     queue: Queue,
   ) => Effect.Effect<
-    (request: DeleteMessageBatchRequest) => Effect.Effect<any, any, any>
+    (
+      request: DeleteMessageBatchRequest,
+    ) => Effect.Effect<
+      sqs.DeleteMessageBatchResult,
+      sqs.DeleteMessageBatchError
+    >
   >
 >()("AWS.SQS.DeleteMessageBatch") {}
 
 export const DeleteMessageBatchLive = Layer.effect(
   DeleteMessageBatch,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* DeleteMessageBatchPolicy;
+    const deleteMessageBatch = yield* sqs.deleteMessageBatch;
 
     return Effect.fn(function* (queue: Queue) {
       const QueueUrl = yield* queue.queueUrl;
       yield* Policy(queue);
       return Effect.fn(function* (request: DeleteMessageBatchRequest) {
-        return yield* sqs.deleteMessageBatch({
+        return yield* deleteMessageBatch({
           ...request,
           QueueUrl: yield* QueueUrl,
         });

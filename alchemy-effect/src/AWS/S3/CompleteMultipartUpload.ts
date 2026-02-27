@@ -17,21 +17,26 @@ export class CompleteMultipartUpload extends Binding.Service<
   (
     bucket: Bucket,
   ) => Effect.Effect<
-    (request: CompleteMultipartUploadRequest) => Effect.Effect<any, any, any>
+    (
+      request: CompleteMultipartUploadRequest,
+    ) => Effect.Effect<
+      S3.CompleteMultipartUploadOutput,
+      S3.CompleteMultipartUploadError
+    >
   >
 >()("AWS.S3.CompleteMultipartUpload") {}
 
 export const CompleteMultipartUploadLive = Layer.effect(
   CompleteMultipartUpload,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* CompleteMultipartUploadPolicy;
+    const completeMultipartUpload = yield* S3.completeMultipartUpload;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: CompleteMultipartUploadRequest) {
-        return yield* S3.completeMultipartUpload({
+        return yield* completeMultipartUpload({
           ...request,
           Bucket: yield* BucketName,
         });

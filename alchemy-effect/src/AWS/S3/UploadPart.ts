@@ -16,20 +16,24 @@ export class UploadPart extends Binding.Service<
   UploadPart,
   (
     bucket: Bucket,
-  ) => Effect.Effect<(request: UploadPartRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (
+      request: UploadPartRequest,
+    ) => Effect.Effect<S3.UploadPartOutput, S3.UploadPartError>
+  >
 >()("AWS.S3.UploadPart") {}
 
 export const UploadPartLive = Layer.effect(
   UploadPart,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* UploadPartPolicy;
+    const uploadPart = yield* S3.uploadPart;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: UploadPartRequest) {
-        return yield* S3.uploadPart({
+        return yield* uploadPart({
           ...request,
           Bucket: yield* BucketName,
         });

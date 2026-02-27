@@ -19,21 +19,21 @@ export class ReceiveMessage extends Binding.Service<
   ) => Effect.Effect<
     (
       request: ReceiveMessageRequest,
-    ) => Effect.Effect<sqs.ReceiveMessageResult, any, any>
+    ) => Effect.Effect<sqs.ReceiveMessageResult, sqs.ReceiveMessageError>
   >
 >()("AWS.SQS.ReceiveMessage") {}
 
 export const ReceiveMessageLive = Layer.effect(
   ReceiveMessage,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* ReceiveMessagePolicy;
+    const receiveMessage = yield* sqs.receiveMessage;
 
     return Effect.fn(function* (queue: Queue) {
       const QueueUrl = yield* queue.queueUrl;
       yield* Policy(queue);
       return Effect.fn(function* (request: ReceiveMessageRequest) {
-        return yield* sqs.receiveMessage({
+        return yield* receiveMessage({
           ...request,
           QueueUrl: yield* QueueUrl,
         });

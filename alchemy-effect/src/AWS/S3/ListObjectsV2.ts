@@ -17,21 +17,23 @@ export class ListObjectsV2 extends Binding.Service<
   (
     bucket: Bucket,
   ) => Effect.Effect<
-    (request?: ListObjectsV2Request) => Effect.Effect<any, any, any>
+    (
+      request?: ListObjectsV2Request,
+    ) => Effect.Effect<S3.ListObjectsV2Output, S3.ListObjectsV2Error>
   >
 >()("AWS.S3.ListObjectsV2") {}
 
 export const ListObjectsV2Live = Layer.effect(
   ListObjectsV2,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* ListObjectsV2Policy;
+    const listObjectsV2 = yield* S3.listObjectsV2;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request?: ListObjectsV2Request) {
-        return yield* S3.listObjectsV2({
+        return yield* listObjectsV2({
           ...request,
           Bucket: yield* BucketName,
         });

@@ -16,20 +16,24 @@ export class HeadObject extends Binding.Service<
   HeadObject,
   (
     bucket: Bucket,
-  ) => Effect.Effect<(request: HeadObjectRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (
+      request: HeadObjectRequest,
+    ) => Effect.Effect<S3.HeadObjectOutput, S3.HeadObjectError>
+  >
 >()("AWS.S3.HeadObject") {}
 
 export const HeadObjectLive = Layer.effect(
   HeadObject,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* HeadObjectPolicy;
+    const headObject = yield* S3.headObject;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: HeadObjectRequest) {
-        return yield* S3.headObject({
+        return yield* headObject({
           ...request,
           Bucket: yield* BucketName,
         });

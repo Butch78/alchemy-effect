@@ -16,20 +16,24 @@ export class CopyObject extends Binding.Service<
   CopyObject,
   (
     bucket: Bucket,
-  ) => Effect.Effect<(request: CopyObjectRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (
+      request: CopyObjectRequest,
+    ) => Effect.Effect<S3.CopyObjectOutput, S3.CopyObjectError>
+  >
 >()("AWS.S3.CopyObject") {}
 
 export const CopyObjectLive = Layer.effect(
   CopyObject,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* CopyObjectPolicy;
+    const copyObject = yield* S3.copyObject;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: CopyObjectRequest) {
-        return yield* S3.copyObject({
+        return yield* copyObject({
           ...request,
           Bucket: yield* BucketName,
         });

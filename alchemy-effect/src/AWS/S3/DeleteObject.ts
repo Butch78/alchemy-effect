@@ -16,20 +16,24 @@ export class DeleteObject extends Binding.Service<
   DeleteObject,
   (
     bucket: Bucket,
-  ) => Effect.Effect<(request: DeleteObjectRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (
+      request: DeleteObjectRequest,
+    ) => Effect.Effect<S3.DeleteObjectOutput, S3.DeleteObjectError>
+  >
 >()("AWS.S3.DeleteObject") {}
 
 export const DeleteObjectLive = Layer.effect(
   DeleteObject,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* DeleteObjectPolicy;
+    const deleteObject = yield* S3.deleteObject;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: DeleteObjectRequest) {
-        return yield* S3.deleteObject({
+        return yield* deleteObject({
           ...request,
           Bucket: yield* BucketName,
         });

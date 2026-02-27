@@ -2,10 +2,12 @@ import type { R2 } from "cloudflare/resources";
 import * as Effect from "effect/Effect";
 
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource, type ResourceEffect } from "../../Resource.ts";
+import { Resource } from "../../Resource.ts";
 import { Account } from "../Account.ts";
 import { CloudflareApi } from "../CloudflareApi.ts";
 import { Worker } from "../Workers/Worker.ts";
+
+export type BucketName = string;
 
 export type BucketProps = {
   name?: string;
@@ -14,36 +16,21 @@ export type BucketProps = {
   locationHint?: Bucket.Location;
 };
 
-export type BucketAttr<Props extends BucketProps> = {
-  bucketName: Props["name"] extends string ? Props["name"] : string;
-  storageClass: Props["storageClass"] extends Bucket.StorageClass
-    ? Props["storageClass"]
-    : "Standard";
-  jurisdiction: Props["jurisdiction"] extends Bucket.Jurisdiction
-    ? Props["jurisdiction"]
-    : "default";
-  location: Bucket.Location | undefined;
-  accountId: string;
-};
-
-export interface Bucket<
-  ID extends string = string,
-  Props extends BucketProps = BucketProps,
-> extends Resource<
+export interface Bucket extends Resource<
   Bucket,
   "Cloudflare.R2.Bucket",
-  ID,
-  Props,
-  BucketAttr<Props>,
+  BucketProps,
+  {
+    bucketName: BucketName;
+    storageClass: Bucket.StorageClass;
+    jurisdiction: Bucket.Jurisdiction;
+    location: Bucket.Location | undefined;
+    accountId: string;
+  },
   Bucket
 > {}
 
-export const Bucket = Resource<{
-  <const ID extends string, const Props extends BucketProps>(
-    id: ID,
-    props?: Props,
-  ): ResourceEffect<Bucket<ID, Props>>;
-}>("Cloudflare.R2.Bucket");
+export const Bucket = Resource<Bucket>("Cloudflare.R2.Bucket");
 
 export declare namespace Bucket {
   export type StorageClass = "Standard" | "InfrequentAccess";
@@ -68,14 +55,14 @@ export const BucketProvider = () =>
 
       const mapResult = <Props extends BucketProps>(
         bucket: R2.Bucket,
-      ): BucketAttr<Props> =>
+      ): Bucket["attr"] =>
         ({
           bucketName: bucket.name,
           storageClass: bucket.storage_class ?? "Standard",
           jurisdiction: bucket.jurisdiction ?? "default",
           location: bucket.location,
           accountId,
-        }) as BucketAttr<Props>;
+        }) as Bucket["attr"];
 
       return {
         diff: Effect.fn(function* ({ id, olds, news, output }) {

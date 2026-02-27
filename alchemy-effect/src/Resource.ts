@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import type * as Layer from "effect/Layer";
 import type { Pipeable } from "effect/Pipeable";
+import type { PolicyLike } from "./Binding.ts";
 import type { Input } from "./Input.ts";
 import type { InstanceId } from "./InstanceId.ts";
 import type * as Output from "./Output.ts";
@@ -16,7 +17,7 @@ export type ResourceClass<Self extends ResourceLike> = ResourceCtor<
   Provider<Self>
 > &
   Effect.Effect<ResourceCtor<Self>> & {
-    provider: ResourceProviders<Self, Self["props"]>;
+    provider: ResourceProviders<Self>;
   };
 
 export interface ResourceLike<
@@ -75,7 +76,35 @@ export const Resource = <R extends ResourceLike>(
   return Object.assign(f, Service);
 };
 
-export interface ResourceProviders<Resource extends ResourceLike, Props> {
+export type RuntimeResourceCtor<
+  R extends ResourceLike,
+  Provided,
+  Req = never,
+> = {
+  (
+    id: string,
+    eff: Effect.Effect<R["props"], never, Req | Provider<any> | PolicyLike>,
+  ): Effect.Effect<R, never, Exclude<Req, Provided>>;
+  (
+    id: string,
+  ): (
+    eff: Effect.Effect<R["props"], never, Req | Provider<any> | PolicyLike>,
+  ) => Effect.Effect<R, never, Exclude<Req, Provided>>;
+};
+
+export type RuntimeResourceClass<
+  Self extends ResourceLike,
+  Provided,
+> = RuntimeResourceCtor<Self, Provider<Self>, Provided> &
+  Effect.Effect<RuntimeResourceCtor<Self, Provided>> & {
+    provider: ResourceProviders<Self>;
+  };
+
+export const RuntimeResource = <R extends ResourceLike, Provided>(
+  type: R["type"],
+): RuntimeResourceClass<R, Provided> => {};
+
+export interface ResourceProviders<Resource extends ResourceLike> {
   effect<
     Req = never,
     ReadReq = never,

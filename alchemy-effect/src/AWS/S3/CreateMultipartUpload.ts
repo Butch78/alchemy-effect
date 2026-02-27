@@ -17,21 +17,26 @@ export class CreateMultipartUpload extends Binding.Service<
   (
     bucket: Bucket,
   ) => Effect.Effect<
-    (request: CreateMultipartUploadRequest) => Effect.Effect<any, any, any>
+    (
+      request: CreateMultipartUploadRequest,
+    ) => Effect.Effect<
+      S3.CreateMultipartUploadOutput,
+      S3.CreateMultipartUploadError
+    >
   >
 >()("AWS.S3.CreateMultipartUpload") {}
 
 export const CreateMultipartUploadLive = Layer.effect(
   CreateMultipartUpload,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* CreateMultipartUploadPolicy;
+    const createMultipartUpload = yield* S3.createMultipartUpload;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: CreateMultipartUploadRequest) {
-        return yield* S3.createMultipartUpload({
+        return yield* createMultipartUpload({
           ...request,
           Bucket: yield* BucketName,
         });

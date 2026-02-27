@@ -7,37 +7,31 @@ import * as kinesis from "distilled-aws/kinesis";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource, type ResourceEffect } from "../../Resource.ts";
+import { Resource } from "../../Resource.ts";
 import { createInternalTags, diffTags } from "../../Tags.ts";
-import { Account } from "../Account.ts";
+import { Account, type AccountID } from "../Account.ts";
+import type { RegionID } from "../Region.ts";
 
 export type StreamRecord = lambda.KinesisStreamRecord;
 
 export type StreamEvent = lambda.KinesisStreamEvent;
 
-export const Stream = Resource<{
-  <const ID extends string, const Props extends StreamProps>(
-    id: ID,
-    props: Props,
-  ): ResourceEffect<Stream<ID, Props>>;
-}>("AWS.Kinesis.Stream");
+export type StreamName = string;
+export type StreamArn =
+  `arn:aws:kinesis:${RegionID}:${AccountID}:stream/${StreamName}`;
 
-export interface Stream<
-  ID extends string = string,
-  Props extends StreamProps = StreamProps,
-> extends Resource<
+export interface Stream extends Resource<
   Stream,
   "AWS.Kinesis.Stream",
-  ID,
-  Props,
-  StreamAttrs<Props>
+  StreamProps,
+  {
+    streamName: StreamName;
+    streamArn: StreamArn;
+    streamStatus: StreamStatus;
+  }
 > {}
 
-export type StreamAttrs<Props extends StreamProps> = {
-  streamName: Props["streamName"] extends string ? Props["streamName"] : string;
-  streamArn: `arn:aws:kinesis:${string}:${string}:stream/${Props["streamName"] extends string ? Props["streamName"] : string}`;
-  streamStatus: StreamStatus;
-};
+export const Stream = Resource<Stream>("AWS.Kinesis.Stream");
 
 export type StreamStatus = "CREATING" | "DELETING" | "ACTIVE" | "UPDATING";
 

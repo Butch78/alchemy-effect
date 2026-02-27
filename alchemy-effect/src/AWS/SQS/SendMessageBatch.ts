@@ -17,21 +17,23 @@ export class SendMessageBatch extends Binding.Service<
   (
     queue: Queue,
   ) => Effect.Effect<
-    (request: SendMessageBatchRequest) => Effect.Effect<any, any, any>
+    (
+      request: SendMessageBatchRequest,
+    ) => Effect.Effect<sqs.SendMessageBatchResult, sqs.SendMessageBatchError>
   >
 >()("AWS.SQS.SendMessageBatch") {}
 
 export const SendMessageBatchLive = Layer.effect(
   SendMessageBatch,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* SendMessageBatchPolicy;
+    const sendMessageBatch = yield* sqs.sendMessageBatch;
 
     return Effect.fn(function* (queue: Queue) {
       const QueueUrl = yield* queue.queueUrl;
       yield* Policy(queue);
       return Effect.fn(function* (request: SendMessageBatchRequest) {
-        return yield* sqs.sendMessageBatch({
+        return yield* sendMessageBatch({
           ...request,
           QueueUrl: yield* QueueUrl,
         });

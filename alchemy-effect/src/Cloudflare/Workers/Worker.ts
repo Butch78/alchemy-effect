@@ -10,55 +10,10 @@ import type { ScopedPlanStatusSession } from "../../Cli/index.ts";
 import { DotAlchemy } from "../../Config.ts";
 import type { FunctionExecutionContext } from "../../ExecutionContext.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import { Resource, type ResourceEffect } from "../../Resource.ts";
+import { Resource } from "../../Resource.ts";
 import { Account } from "../Account.ts";
 import { CloudflareApi } from "../CloudflareApi.ts";
 import * as Assets from "./Assets.ts";
-
-export type WorkerProps = {
-  name?: string;
-  assets?: string | Worker.AssetsProps;
-  logpush?: boolean;
-  observability?: Worker.Observability;
-  subdomain?: Worker.Subdomain;
-  tags?: string[];
-  main: string;
-  compatibility?: {
-    date?: string;
-    flags?: string[];
-  };
-  limits?: Worker.Limits;
-  placement?: Worker.Placement;
-};
-
-export interface WorkerBinding {
-  bindings: Worker.Binding[];
-}
-
-export interface WorkerAttr<Props extends WorkerProps> {
-  workerId: string;
-  workerName: Props["name"] extends string ? Props["name"] : string;
-  logpush: Props["logpush"] extends boolean ? Props["logpush"] : boolean;
-  observability: Props["observability"] extends Worker.Observability
-    ? Props["observability"]
-    : {
-        // whatever cloudflare's (or our, probably ours) default is
-      };
-  url: Props["subdomain"] extends { enabled: infer B }
-    ? B extends false
-      ? undefined
-      : string
-    : string;
-  subdomain: Props["subdomain"] extends {
-    enabled: infer E;
-    previews_enabled: infer P;
-  }
-    ? { enabled: E; previews_enabled: P }
-    : { enabled: true; previews_enabled: true };
-  tags: Props["tags"] extends string[] ? Props["tags"] : string[];
-  accountId: string;
-  hash: { assets: string | undefined; bundle: string };
-}
 
 export class WorkerRuntime extends ServiceMap.Service<WorkerRuntime, Worker>()(
   "Cloudflare.Workers.WorkerRuntime",
@@ -85,27 +40,47 @@ export interface WorkerExecutionContext extends FunctionExecutionContext<"Cloudf
   exports: Record<string, any>;
 }
 
-export interface Worker<
-  Id extends string = string,
-  Props extends WorkerProps = WorkerProps,
->
+export type WorkerProps = {
+  name?: string;
+  assets?: string | Worker.AssetsProps;
+  logpush?: boolean;
+  observability?: Worker.Observability;
+  subdomain?: Worker.Subdomain;
+  tags?: string[];
+  main: string;
+  compatibility?: {
+    date?: string;
+    flags?: string[];
+  };
+  limits?: Worker.Limits;
+  placement?: Worker.Placement;
+};
+
+export interface Worker
   extends
     WorkerExecutionContext,
     Resource<
       Worker,
       "Cloudflare.Worker",
-      Id,
-      Props,
-      WorkerAttr<Props>,
-      WorkerBinding
+      WorkerProps,
+      {
+        workerId: string;
+        workerName: string;
+        logpush: boolean | undefined;
+        url: string | undefined;
+        tags: string[] | undefined;
+        accountId: string;
+        hash: {
+          assets: string | undefined;
+          bundle: string;
+        };
+      },
+      {
+        bindings: Worker.Binding[];
+      }
     > {}
 
-export const Worker = Resource<{
-  <const Id extends string, const Props extends WorkerProps>(
-    id: Id,
-    props?: Props,
-  ): ResourceEffect<Worker<Id, Props>>;
-}>("Cloudflare.Worker");
+export const Worker = Resource<Worker>("Cloudflare.Worker");
 
 export declare namespace Worker {
   export type Observability = Workers.ScriptUpdateParams.Metadata.Observability;
@@ -127,6 +102,7 @@ export declare namespace Worker {
 
 export const WorkerProvider = () =>
   Worker.provider.effect(
+    // @ts-expect-error
     Effect.gen(function* () {
       const api = yield* CloudflareApi;
       const accountId = yield* Account;
@@ -232,7 +208,7 @@ export const WorkerProvider = () =>
         news: WorkerProps,
         bindings: Worker["binding"][],
         olds: WorkerProps | undefined,
-        output: WorkerAttr<WorkerProps> | undefined,
+        output: Worker["attr"] | undefined,
         session: ScopedPlanStatusSession,
       ) {
         const name = yield* createWorkerName(id, news.name);
@@ -278,14 +254,9 @@ export const WorkerProvider = () =>
           yield* setWorkerSubdomain(name, enable);
         }
         return {
-          workerId: worker.id,
+          workerId: worker.id!,
           workerName: name,
           logpush: worker.logpush,
-          observability: metadata.observability,
-          subdomain: news.subdomain ?? {
-            enabled: true,
-            previews_enabled: true,
-          },
           url:
             news.subdomain?.enabled !== false
               ? `https://${name}.${yield* getAccountSubdomain(accountId)}.workers.dev`
@@ -296,7 +267,7 @@ export const WorkerProvider = () =>
             assets: assets?.hash,
             bundle: bundle.hash,
           },
-        } as WorkerAttr<WorkerProps>;
+        } satisfies Worker["attr"];
       });
 
       return {
@@ -342,7 +313,7 @@ export const WorkerProvider = () =>
               ? `https://${workerName}.${yield* getAccountSubdomain(accountId)}.workers.dev`
               : undefined,
             tags: worker.tags,
-          } as WorkerAttr<WorkerProps>;
+          };
         }),
         create: Effect.fnUntraced(function* ({ id, news, bindings, session }) {
           const name = yield* createWorkerName(id, news.name);

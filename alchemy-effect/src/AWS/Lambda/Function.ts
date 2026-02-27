@@ -18,12 +18,7 @@ import type {
   FunctionExecutionContext,
 } from "../../ExecutionContext.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
-import type { Provider } from "../../Provider.ts";
-import {
-  Resource,
-  type ResourceEffect,
-  type ResourceLike,
-} from "../../Resource.ts";
+import { Resource, RuntimeResource } from "../../Resource.ts";
 import { StackName } from "../../Stack.ts";
 import { Stage } from "../../Stage.ts";
 import { createInternalTags, createTagsList, hasTags } from "../../Tags.ts";
@@ -46,6 +41,14 @@ export const isFunction = <T>(value: T): value is T & Function => {
 
 export type Context = lambda.Context;
 
+export type Provided =
+  | Credentials
+  | Region
+  | HttpClient
+  | ExecutionContext
+  | Scope
+  | FunctionRuntime;
+
 export interface FunctionProps {
   main: string;
   handler?: string;
@@ -55,58 +58,32 @@ export interface FunctionProps {
   runtime?: "nodejs22.x" | "nodejs24.x";
 }
 
-export interface FunctionBinding {
-  env?: Record<string, any>;
-  policyStatements?: PolicyStatement[];
-}
-
-export interface FunctionAttr<Props extends FunctionProps> {
-  functionArn: string;
-  functionName: string;
-  functionUrl: Props["url"] extends true
-    ? `http${"s" | ""}://${string}`
-    : undefined;
-  roleName: string;
-  roleArn: string;
-  code: {
-    hash: string;
-  };
-}
-
-export type Provided =
-  | Credentials
-  | Region
-  | HttpClient
-  | ExecutionContext
-  | Scope
-  | FunctionRuntime;
-
-export const Function = Resource<{
-  <
-    const Id extends string,
-    const Props extends FunctionProps = never,
-    // we auto-provide Provided, and expect Resources to bubble out into our Stack Req
-    Req extends Provided | ResourceLike | Provider<any> = never,
-  >(
-    id: Id,
-    effect: Effect.Effect<Props, never, Req>,
-  ): ResourceEffect<Function<Id, Props>, Exclude<Req, Provided>>;
-}>("AWS.Lambda.Function");
-
-export interface Function<
-  Id extends string = string,
-  Props extends FunctionProps = any,
->
+export interface Function
   extends
     FunctionExecutionContext<"AWS.Lambda.Function">,
     Resource<
       Function,
       "AWS.Lambda.Function",
-      Id,
-      Props,
-      FunctionAttr<Props>,
-      FunctionBinding
+      FunctionProps,
+      {
+        functionArn: string;
+        functionName: string;
+        functionUrl: string | undefined;
+        roleName: string;
+        roleArn: string;
+        code: {
+          hash: string;
+        };
+      },
+      {
+        env?: Record<string, any>;
+        policyStatements?: PolicyStatement[];
+      }
     > {}
+
+export const Function = RuntimeResource<Function, Provided>(
+  "AWS.Lambda.Function",
+);
 
 export const FunctionProvider = () =>
   Function.provider.effect(
@@ -582,7 +559,7 @@ export const FunctionProvider = () =>
                   Effect.succeed(undefined),
                 ),
               )) as any,
-            } satisfies FunctionAttr<FunctionProps>;
+            };
           }
           return output;
         }),
@@ -617,7 +594,7 @@ export const FunctionProvider = () =>
               hash,
             },
             roleArn,
-          } satisfies FunctionAttr<FunctionProps>;
+          };
         }),
         create: Effect.fn(function* ({ id, news, bindings, session }) {
           const { roleName, policyName, functionName, functionArn } =
@@ -661,7 +638,7 @@ export const FunctionProvider = () =>
             code: {
               hash,
             },
-          } satisfies FunctionAttr<FunctionProps>;
+          };
         }),
         update: Effect.fn(function* ({
           id,
@@ -712,7 +689,7 @@ export const FunctionProvider = () =>
             code: {
               hash,
             },
-          } satisfies FunctionAttr<FunctionProps>;
+          };
         }),
         delete: Effect.fn(function* ({ output }) {
           yield* iam

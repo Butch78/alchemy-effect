@@ -37,7 +37,7 @@ export interface Output<A = any, Req = any> extends Pipeable {
   readonly req: Req;
 
   [Symbol.iterator](): Iterator<
-    Yieldable<any, void, never, Req | ExecutionContext>,
+    Yieldable<any, void, never, Req>,
     Accessor<A>,
     void
   >;

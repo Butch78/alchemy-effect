@@ -28,22 +28,22 @@ export class GetItem extends Binding.Service<
   ) => Effect.Effect<
     (
       request: GetItemRequest<T>,
-    ) => Effect.Effect<GetItemResult<T, Table.Key<T>>, any, any>
+    ) => Effect.Effect<GetItemResult<T, Table.Key<T>>, DynamoDB.GetItemError>
   >
 >()("AWS.DynamoDB.GetItem") {}
 
 export const GetItemLive = Layer.effect(
   GetItem,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* GetItemPolicy;
+    const getItem = yield* DynamoDB.getItem;
 
     return Effect.fn(function* <T extends Table>(table: T) {
       const TableName = yield* table.tableName;
       yield* Policy(table);
       return Effect.fn(function* (request: GetItemRequest<T>) {
         const tableName = yield* TableName;
-        const { Item, ...rest } = yield* DynamoDB.getItem({
+        const { Item, ...rest } = yield* getItem({
           ...request,
           TableName: tableName,
           Key: {

@@ -14,20 +14,24 @@ export class PutObject extends Binding.Service<
   PutObject,
   (
     bucket: Bucket,
-  ) => Effect.Effect<(request: PutObjectRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (
+      request: PutObjectRequest,
+    ) => Effect.Effect<S3.PutObjectOutput, S3.PutObjectError>
+  >
 >()("AWS.S3.PutObject") {}
 
 export const PutObjectLive = Layer.effect(
   PutObject,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* PutObjectPolicy;
+    const putObject = yield* S3.putObject;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: PutObjectRequest) {
-        return yield* S3.putObject({
+        return yield* putObject({
           ...request,
           Bucket: yield* BucketName,
         });

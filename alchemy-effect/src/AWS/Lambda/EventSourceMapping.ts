@@ -6,7 +6,7 @@ import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import type { Input } from "../../Input.ts";
-import { Resource, type ResourceEffect } from "../../Resource.ts";
+import { Resource } from "../../Resource.ts";
 import { createInternalTags, diffTags, hasTags } from "../../Tags.ts";
 import { Account } from "../Account.ts";
 
@@ -145,42 +145,33 @@ export interface EventSourceMappingProps {
   tags?: Record<string, string>;
 }
 
-export interface EventSourceMappingAttrs {
-  /**
-   * The UUID of the event source mapping.
-   */
-  uuid: string;
-  /**
-   * The ARN of the event source mapping.
-   */
-  eventSourceMappingArn: string;
-  /**
-   * The ARN of the Lambda function.
-   */
-  functionArn: string;
-  /**
-   * The current state of the event source mapping.
-   */
-  state: string;
-}
-
-export const EventSourceMapping = Resource<{
-  <const ID extends string, const Props extends EventSourceMappingProps>(
-    id: ID,
-    props: Props,
-  ): ResourceEffect<EventSourceMapping<ID, Props>>;
-}>("AWS.Lambda.EventSourceMapping");
-
-export interface EventSourceMapping<
-  ID extends string = string,
-  Props extends EventSourceMappingProps = EventSourceMappingProps,
-> extends Resource<
-  EventSourceMappingProps,
+export interface EventSourceMapping extends Resource<
+  EventSourceMapping,
   "AWS.Lambda.EventSourceMapping",
-  ID,
-  Props,
-  EventSourceMappingAttrs
+  EventSourceMappingProps,
+  {
+    /**
+     * The UUID of the event source mapping.
+     */
+    uuid: string;
+    /**
+     * The ARN of the event source mapping.
+     */
+    eventSourceMappingArn: string;
+    /**
+     * The ARN of the Lambda function.
+     */
+    functionArn: string;
+    /**
+     * The current state of the event source mapping.
+     */
+    state: string;
+  }
 > {}
+
+export const EventSourceMapping = Resource<EventSourceMapping>(
+  "AWS.Lambda.EventSourceMapping",
+);
 
 const retryTransient: <A, R, Err>(
   self: Effect.Effect<A, Err, R>,
@@ -213,41 +204,6 @@ export const EventSourceMappingProvider = () =>
     Effect.gen(function* () {
       const region = yield* Region;
       const accountId = yield* Account;
-
-      const findExistingMapping = (
-        id: string,
-        eventSourceArn: string,
-        functionName: string,
-        marker?: string,
-      ) =>
-        lambda.listEventSourceMappings
-          .pages({
-            FunctionName: functionName,
-            Marker: marker,
-          })
-          .pipe(
-            Stream.mapEffect(
-              Effect.fn(function* (page) {
-                const mapping = page.EventSourceMappings?.find(
-                  (m) => m.EventSourceArn === eventSourceArn,
-                );
-
-                if (mapping?.UUID) {
-                  const { Tags } = yield* lambda
-                    .listTags({
-                      Resource: `arn:aws:lambda:${region}:${accountId}:event-source-mapping:${mapping.UUID}`,
-                    })
-                    .pipe(retryTransient);
-                  if (hasTags(yield* createInternalTags(id), Tags)) {
-                    return mapping;
-                  }
-                }
-              }),
-            ),
-            Stream.filter((item) => item !== undefined),
-            Stream.runHead,
-            Effect.map(Option.getOrUndefined),
-          );
 
       const toCreateRequest = (
         props: EventSourceMappingProps,
@@ -320,7 +276,7 @@ export const EventSourceMappingProvider = () =>
 
       const configToAttrs = (
         config: lambda.EventSourceMappingConfiguration,
-      ): EventSourceMappingAttrs => ({
+      ): EventSourceMapping["attr"] => ({
         uuid: config.UUID!,
         eventSourceMappingArn: config.EventSourceMappingArn!,
         functionArn: config.FunctionArn!,
@@ -453,7 +409,7 @@ export const EventSourceMappingProvider = () =>
 
           return configToAttrs(config);
         }),
-        delete: Effect.fn(function* ({ id, news, output }) {
+        delete: Effect.fn(function* ({ output }) {
           yield* lambda.deleteEventSourceMapping({ UUID: output.uuid }).pipe(
             Effect.retry({
               while: (e: any) =>

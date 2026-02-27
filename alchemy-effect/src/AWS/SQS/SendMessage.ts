@@ -16,20 +16,25 @@ export class SendMessage extends Binding.Service<
   SendMessage,
   (
     queue: Queue,
-  ) => Effect.Effect<(request: SendMessageRequest) => Effect.Effect<any, any, any>>
+  ) => Effect.Effect<
+    (request: SendMessageRequest) => Effect.Effect<
+      sqs.SendMessageResult,
+      sqs.SendMessageError
+    >
+  >
 >()("AWS.SQS.SendMessage") {}
 
 export const SendMessageLive = Layer.effect(
   SendMessage,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* SendMessagePolicy;
+    const sendMessage = yield* sqs.sendMessage;
 
     return Effect.fn(function* (queue: Queue) {
       const QueueUrl = yield* queue.queueUrl;
       yield* Policy(queue);
       return Effect.fn(function* (request: SendMessageRequest) {
-        return yield* sqs.sendMessage({
+        return yield* sendMessage({
           ...request,
           QueueUrl: yield* QueueUrl,
           MessageBody: request.MessageBody,

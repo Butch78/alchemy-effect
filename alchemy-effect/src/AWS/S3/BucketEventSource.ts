@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
-import * as ServiceMap from "effect/ServiceMap";
 import * as Stream from "effect/Stream";
+import * as Binding from "../../Binding.ts";
 import type { Bucket } from "./Bucket.ts";
 import type {
   BucketNotification,
@@ -8,7 +8,7 @@ import type {
 } from "./BucketNotifications.ts";
 import type { S3EventType } from "./S3Event.ts";
 
-export class BucketEventSource extends ServiceMap.Service<
+export class BucketEventSource extends Binding.Service<
   BucketEventSource,
   BucketEventSourceService
 >()("BucketNotificationStream") {}

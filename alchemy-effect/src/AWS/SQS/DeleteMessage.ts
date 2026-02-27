@@ -17,21 +17,23 @@ export class DeleteMessage extends Binding.Service<
   (
     queue: Queue,
   ) => Effect.Effect<
-    (request: DeleteMessageRequest) => Effect.Effect<any, any, any>
+    (
+      request: DeleteMessageRequest,
+    ) => Effect.Effect<sqs.DeleteMessageResponse, sqs.DeleteMessageError>
   >
 >()("AWS.SQS.DeleteMessage") {}
 
 export const DeleteMessageLive = Layer.effect(
   DeleteMessage,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* DeleteMessagePolicy;
+    const deleteMessage = yield* sqs.deleteMessage;
 
     return Effect.fn(function* (queue: Queue) {
       const QueueUrl = yield* queue.queueUrl;
       yield* Policy(queue);
       return Effect.fn(function* (request: DeleteMessageRequest) {
-        return yield* sqs.deleteMessage({
+        return yield* deleteMessage({
           ...request,
           QueueUrl: yield* QueueUrl,
         });

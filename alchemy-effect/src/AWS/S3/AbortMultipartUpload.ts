@@ -17,21 +17,26 @@ export class AbortMultipartUpload extends Binding.Service<
   (
     bucket: Bucket,
   ) => Effect.Effect<
-    (request: AbortMultipartUploadRequest) => Effect.Effect<any, any, any>
+    (
+      request: AbortMultipartUploadRequest,
+    ) => Effect.Effect<
+      S3.AbortMultipartUploadOutput,
+      S3.AbortMultipartUploadError
+    >
   >
 >()("AWS.S3.AbortMultipartUpload") {}
 
 export const AbortMultipartUploadLive = Layer.effect(
   AbortMultipartUpload,
-  // @ts-expect-error
   Effect.gen(function* () {
     const Policy = yield* AbortMultipartUploadPolicy;
+    const abortMultipartUpload = yield* S3.abortMultipartUpload;
 
     return Effect.fn(function* (bucket: Bucket) {
       const BucketName = yield* bucket.bucketName;
       yield* Policy(bucket);
       return Effect.fn(function* (request: AbortMultipartUploadRequest) {
-        return yield* S3.abortMultipartUpload({
+        return yield* abortMultipartUpload({
           ...request,
           Bucket: yield* BucketName,
         });
