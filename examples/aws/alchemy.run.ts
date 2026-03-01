@@ -6,11 +6,11 @@ import * as Layer from "effect/Layer";
 import JobFunction from "./src/JobFunction.ts";
 
 const AWS_REGION = Config.string("AWS_REGION").pipe(
-  Config.withDefault(() => "us-west-2"),
+  Config.withDefault("us-west-2"),
 );
 
 const AWS_PROFILE = Config.string("AWS_PROFILE").pipe(
-  Config.withDefault(() => "default"),
+  Config.withDefault("default"),
 );
 
 const awsConfig = Layer.effect(

@@ -2,7 +2,7 @@ import type { Input, InputProps } from "@/Input";
 import * as Output from "@/Output";
 import * as Plan from "@/Plan";
 import * as Stack from "@/Stack";
-import type { ResourceState, ResourceStatus } from "@/State";
+import { State, type ResourceState, type ResourceStatus } from "@/State";
 import { test } from "@/Test/Vitest";
 import { describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -20,31 +20,19 @@ const _test = test;
 
 const instanceId = "852f6ec2e19b66589825efe14dca2971";
 
-// class MyBucket extends Bucket("MyBucket", {
-//   name: "test-bucket",
-// }) {}
-
-// class MyQueue extends Queue("MyQueue", {
-//   name: "test-queue",
-// }) {}
-
-// const MyFunction = Function("MyFunction", {
-//   name: "test-function",
-//   env: {
-//     QUEUE_URL: Output.of(MyQueue).queueUrl,
-//   },
-// })
-
 const makePlan = <A, Err = never, Req = never>(
   effect: Effect.Effect<A, Err, Req>,
 ): Effect.Effect<Stack.StackSpec & { output: A }, Err, never> =>
-  effect.pipe(
-    Effect.provide(TestLayers),
-    Effect.provideService(Stage, "test"),
-    // @ts-expect-error
-    Stack.make("test"),
-    Effect.flatMap(Plan.make),
-  );
+  // @ts-expect-error
+  Effect.gen(function* () {
+    const stack = yield* Stack.Stack;
+    return yield* effect.pipe(
+      Stack.make(stack.name),
+      Effect.provideService(Stage, stack.stage),
+      Effect.flatMap(Plan.make),
+      Effect.provide(TestLayers),
+    );
+  });
 
 test(
   "create all resources when plan is empty",
@@ -183,6 +171,11 @@ test(
     }),
   },
   Effect.gen(function* () {
+    const state = yield* State;
+    const resourceIds = yield* state.list({
+      stack: "test",
+      stage: "test",
+    });
     expect(
       yield* makePlan(
         Effect.gen(function* () {
@@ -212,9 +205,9 @@ test(
             },
           },
           resource: {
-            id: "MyBucket",
-            type: "Test.Bucket",
-            props: {
+            LogicalId: "MyBucket",
+            Type: "Test.Bucket",
+            Props: {
               name: "test-bucket",
             },
           },
@@ -245,7 +238,7 @@ test(
   },
   Effect.gen(function* () {
     expect(
-      Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         yield* TestResource("A", {
           replaceString: "A",
         });
@@ -260,7 +253,7 @@ test(
     });
 
     expect(
-      Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         yield* TestResource("A", {
           replaceString: "B",
         });
@@ -277,13 +270,14 @@ test(
       deletions: expect.emptyObject(),
     });
 
+    let B: TestResource;
     expect(
-      Effect.gen(function* () {
-        const B = yield* TestResource("B", {
+      yield* Effect.gen(function* () {
+        B = yield* TestResource("B", {
           string: "A",
         });
         yield* TestResource("A", {
-          string: B.string,
+          replaceString: B.string,
         });
       }).pipe(makePlan),
     ).toMatchObject({
@@ -291,7 +285,7 @@ test(
         A: {
           action: "replace",
           props: {
-            replaceString: "B",
+            replaceString: expect.propExpr("string", B!),
           },
         },
       },

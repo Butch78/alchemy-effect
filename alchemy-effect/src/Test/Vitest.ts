@@ -94,7 +94,7 @@ export function test(
     ? (testPath.split("/test/").pop() ?? "")
     : NodePath.basename(testPath);
   const testPathWithoutExt = testDir.replace(/\.[^.]+$/, "");
-  const appName = `${testPathWithoutExt}-${name}`
+  const stackName = `${testPathWithoutExt}-${name}`
     .replaceAll(/[^a-zA-Z0-9_]/g, "-")
     .replace(/-+/g, "-");
 
@@ -146,7 +146,7 @@ export function test(
   const stack = Layer.effect(
     Stack.Stack,
     Effect.succeed({
-      name: appName,
+      name: stackName,
       stage: "test",
       resources: {},
       bindings: {},
@@ -178,7 +178,7 @@ export function test(
     Effect.provide(NodeServices.layer),
   );
 
-  return it.scopedLive(name, () => test, options.timeout);
+  return it.live(name, () => test, options.timeout);
 }
 
 export namespace test {

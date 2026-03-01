@@ -37,13 +37,7 @@ export const StackName = Stack.use((stack) => Effect.succeed(stack.name));
 
 export const make =
   <const Name extends string>(name: Name) =>
-  <A, Err = never>(
-    effect: Effect.Effect<A, Err, StackServices>,
-  ): Effect.Effect<
-    StackSpec<A>,
-    Err,
-    Stage | FileSystem | Path | DotAlchemy | HttpClient
-  > =>
+  <A, Err = never, Req = never>(effect: Effect.Effect<A, Err, Req>) =>
     effect.pipe(
       Effect.flatMap((output) =>
         Stack.asEffect().pipe(

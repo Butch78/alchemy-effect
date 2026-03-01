@@ -82,7 +82,7 @@ export const Resource = <R extends ResourceLike>(
       } as any,
       {
         get: (target, prop) =>
-          prop in target
+          typeof prop === "symbol" || prop in target
             ? target[prop as keyof typeof target]
             : new Output.PropExpr(Output.of(Resource), prop),
       },
