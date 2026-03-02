@@ -225,38 +225,6 @@ const queue = yield* SQS.Queue("JobsQueue").pipe(
   RemovalPolicy.retain(stage === "prod"),
 );
 ```
-
-## Multi-Cloud
-
-alchemy-effect supports multiple cloud providers. The same patterns apply — Resources are Effects, Bindings connect them.
-
-```typescript
-import * as Cloudflare from "alchemy-effect/Cloudflare";
-import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
-import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-
-export default Effect.gen(function* () {
-  const cache = yield* Cloudflare.KV.Namespace("Cache");
-
-  const get = yield* Cloudflare.KV.Get.bind(cache);
-
-  yield* Http.serve(Effect.gen(function*() {
-    const request = yield* HttpServerRequest
-    return HttpServerResponse.text(yield* get(request.url.pathname));
-  }));
-
-  return {
-    main: import.meta.filename,
-  } as Cloudflare.WorkerProps;
-}).pipe(
-  Effect.provide(
-    Layer.mergeAll(Cloudflare.KV.GetLive, Cloudflare.KV.PutLive),
-  ),
-  Cloudflare.Worker("MyWorker"),
-);
-```
-
 ## AWS Configuration
 
 Configure AWS credentials and region per stage using Effect Layers and Config.
