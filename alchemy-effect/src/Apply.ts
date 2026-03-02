@@ -74,7 +74,8 @@ export const apply = <P extends Plan>(
       // all resources are deleted, return undefined
       return undefined;
     }
-    return yield* Output.evaluate(plan.output, resources);
+    const output = yield* Output.evaluate(plan.output, resources);
+    return output;
     // return resources as {
     //   [k in keyof AppliedPlan<P>]: AppliedPlan<P>[k];
     // };
@@ -104,33 +105,33 @@ const expandAndPivot = Effect.fnUntraced(function* (
 
   const apply: (node: Apply) => Effect.Effect<any, never, never> = (node) =>
     Effect.gen(function* () {
+      const logicalId = node.resource.LogicalId;
+
       const commit = <State extends ResourceState>(value: State) =>
         state.set({
           stack: stackName,
           stage: stage,
-          logicalId: node.resource.id,
+          logicalId,
           value,
         });
-
-      const id = node.resource.id;
 
       const scopedSession = {
         ...session,
         note: (note: string) =>
           session.emit({
-            id,
+            id: logicalId,
             kind: "annotate",
             message: note,
           }),
       } satisfies ScopedPlanStatusSession;
 
-      return yield* (outputs[id] ??= yield* Effect.cached(
+      return yield* (outputs[logicalId] ??= yield* Effect.cached(
         Effect.gen(function* () {
           const report = (status: ApplyStatus) =>
             session.emit({
               kind: "status-change",
-              id,
-              type: node.resource.type,
+              id: logicalId,
+              type: node.resource.Type,
               status,
             });
 
@@ -156,11 +157,11 @@ const expandAndPivot = Effect.fnUntraced(function* (
               yield* commit<CreatingResourceState>({
                 status: "creating",
                 instanceId,
-                logicalId: id,
+                logicalId,
                 downstream: node.downstream,
                 props: node.props,
                 providerVersion: node.provider.version ?? 0,
-                resourceType: node.resource.type,
+                resourceType: node.resource.Type,
                 bindings: node.bindings,
               });
               return instanceId;
@@ -176,11 +177,11 @@ const expandAndPivot = Effect.fnUntraced(function* (
               yield* commit<ReplacingResourceState>({
                 status: "replacing",
                 instanceId,
-                logicalId: id,
+                logicalId,
                 downstream: node.downstream,
                 props: node.props,
                 providerVersion: node.provider.version ?? 0,
-                resourceType: node.resource.type,
+                resourceType: node.resource.Type,
                 bindings: node.bindings,
                 old: node.state,
                 deleteFirst: node.deleteFirst,
@@ -192,7 +193,7 @@ const expandAndPivot = Effect.fnUntraced(function* (
             }
             // this should never happen
             return yield* Effect.die(
-              `Instance ID not found for resource '${id}' and action is '${node.action}'`,
+              `Instance ID not found for resource '${logicalId}' and action is '${node.action}'`,
             );
           });
 
@@ -206,9 +207,9 @@ const expandAndPivot = Effect.fnUntraced(function* (
               const checkpoint = (attr: any) =>
                 commit<CreatingResourceState>({
                   status: "creating",
-                  logicalId: id,
+                  logicalId,
                   instanceId,
-                  resourceType: node.resource.type,
+                  resourceType: node.resource.Type,
                   props: news,
                   attr,
                   providerVersion: node.provider.version ?? 0,
@@ -232,7 +233,7 @@ const expandAndPivot = Effect.fnUntraced(function* (
 
                 // stub the resource prior to resolving upstream resources or bindings if a stub is available
                 attr = yield* node.provider.precreate({
-                  id,
+                  id: logicalId,
                   news: node.props,
                   session: scopedSession,
                   instanceId,
@@ -249,7 +250,7 @@ const expandAndPivot = Effect.fnUntraced(function* (
               );
 
               attr = yield* node.provider.create({
-                id,
+                id: logicalId,
                 news,
                 instanceId,
                 bindings: bindingOutputs,
@@ -258,9 +259,9 @@ const expandAndPivot = Effect.fnUntraced(function* (
 
               yield* commit<CreatedResourceState>({
                 status: "created",
-                logicalId: id,
+                logicalId,
                 instanceId,
-                resourceType: node.resource.type,
+                resourceType: node.resource.Type,
                 props: news,
                 attr,
                 bindings: bindingOutputs,
@@ -296,9 +297,9 @@ const expandAndPivot = Effect.fnUntraced(function* (
                   })
                 : commit<UpdatingReourceState>({
                     status: "updating",
-                    logicalId: id,
+                    logicalId,
                     instanceId,
-                    resourceType: node.resource.type,
+                    resourceType: node.resource.Type,
                     props: news,
                     attr: node.state.attr,
                     providerVersion: node.provider.version ?? 0,
@@ -318,7 +319,7 @@ const expandAndPivot = Effect.fnUntraced(function* (
               );
 
               const attr = yield* node.provider.update({
-                id,
+                id: logicalId,
                 news,
                 instanceId,
                 bindings: bindingOutputs,
@@ -341,9 +342,9 @@ const expandAndPivot = Effect.fnUntraced(function* (
               } else {
                 yield* commit<UpdatedResourceState>({
                   status: "updated",
-                  logicalId: id,
+                  logicalId,
                   instanceId,
-                  resourceType: node.resource.type,
+                  resourceType: node.resource.Type,
                   props: news,
                   attr,
                   bindings: node.bindings.map((binding, i) => ({
@@ -368,9 +369,9 @@ const expandAndPivot = Effect.fnUntraced(function* (
                 yield* commit<ReplacingResourceState>(
                   (state = {
                     status: "replacing",
-                    logicalId: id,
+                    logicalId,
                     instanceId,
-                    resourceType: node.resource.type,
+                    resourceType: node.resource.Type,
                     props: node.props,
                     bindings: node.bindings,
                     attr: node.state.attr,
@@ -409,9 +410,9 @@ const expandAndPivot = Effect.fnUntraced(function* (
               }: Pick<S, "status" | "attr">) =>
                 commit<S>({
                   status,
-                  logicalId: id,
+                  logicalId,
                   instanceId,
-                  resourceType: node.resource.type,
+                  resourceType: node.resource.Type,
                   props: news,
                   attr,
                   providerVersion: node.provider.version ?? 0,
@@ -431,7 +432,7 @@ const expandAndPivot = Effect.fnUntraced(function* (
 
                 // stub the resource prior to resolving upstream resources or bindings if a stub is available
                 attr = yield* node.provider.precreate({
-                  id,
+                  id: logicalId,
                   news: node.props,
                   session: scopedSession,
                   instanceId,
@@ -446,7 +447,7 @@ const expandAndPivot = Effect.fnUntraced(function* (
               yield* report("creating replacement");
 
               attr = yield* node.provider.create({
-                id,
+                id: logicalId,
                 news,
                 instanceId,
                 bindings,
@@ -551,7 +552,7 @@ const collectGarbage = Effect.fnUntraced(function* (
         state.set({
           stack: stackName,
           stage: stage,
-          logicalId: logicalId,
+          logicalId,
           value,
         });
 
@@ -616,7 +617,7 @@ const collectGarbage = Effect.fnUntraced(function* (
             yield* state.delete({
               stack: stackName,
               stage: stage,
-              logicalId: logicalId,
+              logicalId,
             });
             yield* report("deleted");
           } else {

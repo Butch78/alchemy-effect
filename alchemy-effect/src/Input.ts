@@ -31,8 +31,14 @@ export type InputProps<
 };
 
 export declare namespace Input {
-  export type Resolve<T> =
-    T extends Output<infer U>
+  export type Resolve<T> = T extends {
+    Type: string;
+    Attributes: infer Attributes;
+  }
+    ? {
+        [K in keyof Attributes]: Resolve<Attributes[K]>;
+      }
+    : T extends Output<infer U>
       ? U
       : T extends
             | Primitive

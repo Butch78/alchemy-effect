@@ -848,8 +848,8 @@ describe("stable properties should not cause downstream changes", () => {
     description: string,
     input: (A: TestResource) => Input<TestResourceProps>,
   ) => {
-    // get the keys
-    const props = input(Output.of({}) as any);
+    // @ts-expect-error - get the keys
+    const props = input(Output.of({}));
     _test(
       description,
       {

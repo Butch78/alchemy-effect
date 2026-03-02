@@ -135,12 +135,12 @@ const failOnMultiple = (
 const deploy = <A, Err = never, Req = never>(
   effect: Effect.Effect<A, Err, Req>,
 ): Effect.Effect<Input.Resolve<A>, Err, never> =>
+  // @ts-expect-error
   effect.pipe(
-    Effect.provide(TestLayers),
-    Effect.provideService(Stage, "test"),
-    // @ts-expect-error
     Stack.make("test"),
     Effect.flatMap(Plan.make),
+    Effect.provide(TestLayers),
+    Effect.provideService(Stage, "test"),
     Effect.flatMap(apply),
   );
 
@@ -166,11 +166,11 @@ describe("basic operations", () => {
         }).pipe(deploy),
       ).toEqual("test-string-new");
 
-      yield* destroy(testStack, testStage);
+      yield* destroy();
 
       expect(yield* getState("A")).toBeUndefined();
       expect(yield* listState()).toEqual([]);
-    }),
+    }).pipe(Effect.provide(MockLayers())),
   );
 
   test(
@@ -428,7 +428,7 @@ describe("from creating state", () => {
       // 2. Call destroy - this triggers collectGarbage which tries to delete
       // the orphaned resource. The bug is that output is undefined in the
       // delete call when the resource never completed creation.
-      yield* destroy(testStack, testStage);
+      yield* destroy();
 
       // Resource should be cleaned up
       expect(yield* getState("A")).toBeUndefined();
@@ -446,7 +446,7 @@ describe("from creating state", () => {
       expect((yield* getState("A"))?.status).toEqual("creating");
       expect((yield* getState("A"))?.attr).toBeUndefined();
 
-      yield* destroy(testStack, testStage).pipe(
+      yield* destroy().pipe(
         hook({
           delete: () => Effect.fail(new ResourceFailure()),
           read: () =>
@@ -460,7 +460,7 @@ describe("from creating state", () => {
       expect((yield* getState("A"))?.status).toEqual("deleting");
 
       // actually delete this time
-      yield* destroy(testStack, testStage).pipe(
+      yield* destroy().pipe(
         hook({
           read: () =>
             Effect.succeed({
@@ -498,7 +498,7 @@ describe("from creating state", () => {
 
       // 3. Call destroy - this triggers collectGarbage which tries to delete
       // the resource. The bug is that old.attr is undefined.
-      yield* destroy(testStack, testStage).pipe(
+      yield* destroy().pipe(
         hook({
           read: () =>
             Effect.succeed({
@@ -868,7 +868,7 @@ describe("from deleting state", () => {
       }).pipe(deploy);
       expect((yield* getState("A"))?.status).toEqual("created");
 
-      yield* destroy(testStack, testStage).pipe(
+      yield* destroy().pipe(
         hook({
           delete: () => Effect.fail(new ResourceFailure()),
         }),
@@ -899,7 +899,7 @@ describe("from deleting state", () => {
       expect((yield* getState("A"))?.status).toEqual("created");
 
       // 2. Try to delete but fail
-      yield* destroy(testStack, testStage).pipe(
+      yield* destroy().pipe(
         hook({
           delete: () => Effect.fail(new ResourceFailure()),
         }),
@@ -1008,7 +1008,7 @@ describe("dependent resources (A -> B)", () => {
         expect((yield* getState("A"))?.status).toEqual("created");
         expect((yield* getState("B"))?.status).toEqual("created");
 
-        yield* destroy(testStack, testStage);
+        yield* destroy();
 
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
@@ -1256,14 +1256,14 @@ describe("dependent resources (A -> B)", () => {
         expect((yield* getState("B"))?.status).toEqual("created");
 
         // Orphan deletion: B delete fails
-        yield* destroy(testStack, testStage).pipe(hook(failOn("B", "delete")));
+        yield* destroy().pipe(hook(failOn("B", "delete")));
 
         // B should be in deleting state, A should still be created (waiting for B)
         expect((yield* getState("B"))?.status).toEqual("deleting");
         expect((yield* getState("A"))?.status).toEqual("created");
 
         // Recovery: re-apply destroy should delete B then A
-        yield* destroy(testStack, testStage);
+        yield* destroy();
 
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
@@ -1281,14 +1281,14 @@ describe("dependent resources (A -> B)", () => {
         expect((yield* getState("B"))?.status).toEqual("created");
 
         // Orphan deletion: B succeeds, A fails
-        yield* destroy(testStack, testStage).pipe(hook(failOn("A", "delete")));
+        yield* destroy().pipe(hook(failOn("A", "delete")));
 
         // B should be deleted, A should be in deleting state
         expect(yield* getState("B")).toBeUndefined();
         expect((yield* getState("A"))?.status).toEqual("deleting");
 
         // Recovery: re-apply destroy should delete A
-        yield* destroy(testStack, testStage);
+        yield* destroy();
 
         expect(yield* getState("A")).toBeUndefined();
       }).pipe(Effect.provide(MockLayers())),
@@ -1382,7 +1382,7 @@ describe("three-level dependency chain (A -> B -> C)", () => {
           yield* TestResource("C", { string: B.string });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage);
+        yield* destroy();
 
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
@@ -1732,14 +1732,14 @@ describe("three-level dependency chain (A -> B -> C)", () => {
           yield* TestResource("C", { string: B.string });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage).pipe(hook(failOn("C", "delete")));
+        yield* destroy().pipe(hook(failOn("C", "delete")));
 
         expect((yield* getState("C"))?.status).toEqual("deleting");
         expect((yield* getState("B"))?.status).toEqual("created");
         expect((yield* getState("A"))?.status).toEqual("created");
 
         // Recovery
-        yield* destroy(testStack, testStage);
+        yield* destroy();
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
         expect(yield* getState("C")).toBeUndefined();
@@ -1755,14 +1755,14 @@ describe("three-level dependency chain (A -> B -> C)", () => {
           yield* TestResource("C", { string: B.string });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage).pipe(hook(failOn("B", "delete")));
+        yield* destroy().pipe(hook(failOn("B", "delete")));
 
         expect(yield* getState("C")).toBeUndefined();
         expect((yield* getState("B"))?.status).toEqual("deleting");
         expect((yield* getState("A"))?.status).toEqual("created");
 
         // Recovery
-        yield* destroy(testStack, testStage);
+        yield* destroy();
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
       }).pipe(Effect.provide(MockLayers())),
@@ -1777,14 +1777,14 @@ describe("three-level dependency chain (A -> B -> C)", () => {
           yield* TestResource("C", { string: B.string });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage).pipe(hook(failOn("A", "delete")));
+        yield* destroy().pipe(hook(failOn("A", "delete")));
 
         expect(yield* getState("C")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
         expect((yield* getState("A"))?.status).toEqual("deleting");
 
         // Recovery
-        yield* destroy(testStack, testStage);
+        yield* destroy();
         expect(yield* getState("A")).toBeUndefined();
       }).pipe(Effect.provide(MockLayers())),
     );
@@ -1865,7 +1865,7 @@ describe("diamond dependencies (A -> B,C -> D)", () => {
           });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage);
+        yield* destroy();
 
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
@@ -2173,7 +2173,7 @@ describe("diamond dependencies (A -> B,C -> D)", () => {
           });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage).pipe(hook(failOn("D", "delete")));
+        yield* destroy().pipe(hook(failOn("D", "delete")));
 
         expect((yield* getState("D"))?.status).toEqual("deleting");
         expect((yield* getState("B"))?.status).toEqual("created");
@@ -2181,7 +2181,7 @@ describe("diamond dependencies (A -> B,C -> D)", () => {
         expect((yield* getState("A"))?.status).toEqual("created");
 
         // Recovery
-        yield* destroy(testStack, testStage);
+        yield* destroy();
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
         expect(yield* getState("C")).toBeUndefined();
@@ -2201,7 +2201,7 @@ describe("diamond dependencies (A -> B,C -> D)", () => {
           });
         }).pipe(deploy);
 
-        yield* destroy(testStack, testStage).pipe(hook(failOn("B", "delete")));
+        yield* destroy().pipe(hook(failOn("B", "delete")));
 
         expect(yield* getState("D")).toBeUndefined();
         expect((yield* getState("B"))?.status).toEqual("deleting");
@@ -2211,7 +2211,7 @@ describe("diamond dependencies (A -> B,C -> D)", () => {
         expect((yield* getState("A"))?.status).toEqual("created");
 
         // Recovery
-        yield* destroy(testStack, testStage);
+        yield* destroy();
         expect(yield* getState("A")).toBeUndefined();
         expect(yield* getState("B")).toBeUndefined();
         expect(yield* getState("C")).toBeUndefined();
@@ -2597,14 +2597,14 @@ describe("orphan chain deletion", () => {
       }).pipe(deploy);
 
       // Remove all three - C fails to delete
-      yield* destroy(testStack, testStage).pipe(hook(failOn("C", "delete")));
+      yield* destroy().pipe(hook(failOn("C", "delete")));
 
       expect((yield* getState("C"))?.status).toEqual("deleting");
       expect((yield* getState("B"))?.status).toEqual("created");
       expect((yield* getState("A"))?.status).toEqual("created");
 
       // Recovery
-      yield* destroy(testStack, testStage);
+      yield* destroy();
       expect(yield* getState("A")).toBeUndefined();
       expect(yield* getState("B")).toBeUndefined();
       expect(yield* getState("C")).toBeUndefined();

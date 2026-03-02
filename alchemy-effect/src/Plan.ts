@@ -46,13 +46,15 @@ export type CRUD<R extends ResourceLike = any> =
   | Replace<R>
   | NoopUpdate<R>;
 
-export type Apply<R extends ResourceLike = any> =
+export type Apply<R extends ResourceLike = ResourceLike> =
   | Create<R>
   | Update<R>
   | Replace<R>
   | NoopUpdate<R>;
 
-export interface BaseNode<R extends ResourceLike = ResourceLike> {
+export interface BaseNode<
+  R extends ResourceLike<string> = ResourceLike<string>,
+> {
   resource: R;
   provider: ProviderService<R>;
   downstream: string[];
@@ -650,6 +652,7 @@ export const make = <A>(
     return {
       resources: resourceGraph,
       deletions,
+      output: stack.output,
     } as Plan;
   });
 
