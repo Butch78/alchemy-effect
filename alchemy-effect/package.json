@@ -180,6 +180,7 @@
     "@types/aws-lambda": "catalog:",
     "ai": "catalog:",
     "aws4fetch": "catalog:",
+    "capnp-es": "catalog:",
     "cloudflare": "catalog:",
     "fast-glob": "^3.3.2",
     "fast-xml-parser": "catalog:",
@@ -188,6 +189,7 @@
     "rolldown": "catalog:",
     "solid-js": "catalog:",
     "web-tree-sitter": "catalog:",
+    "workerd": "catalog:",
     "yaml": "catalog:"
   },
   "devDependencies": {

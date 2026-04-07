@@ -30,6 +30,7 @@ smoke
 *.tgz
 *.js
 *.d.ts
+!/alchemy-effect/src/Cloudflare/Local/*.d.ts
 *.map
 
 .attest
