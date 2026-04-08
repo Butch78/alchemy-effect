@@ -1,15 +1,6 @@
 import type * as cf from "@cloudflare/workers-types";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import {
-  Rpc,
-  RpcClient,
-  RpcGroup,
-} from "effect/unstable/rpc";
-import {
-  makeWorkerRpcProtocol,
-  runWorkerRpc,
-} from "../http-rpc-client.ts";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -31,11 +22,6 @@ export const R2ObjectInfo = Schema.Struct({
 
 export type R2ObjectInfo = typeof R2ObjectInfo.Type;
 
-const R2GetResult = Schema.Struct({
-  ...R2ObjectInfo.fields,
-  base64Body: Schema.NullOr(Schema.String),
-});
-
 const R2ListResult = Schema.Struct({
   objects: Schema.Array(Schema.Struct({ ...R2ObjectInfo.fields })),
   truncated: Schema.Boolean,
@@ -43,58 +29,16 @@ const R2ListResult = Schema.Struct({
   delimitedPrefixes: Schema.Array(Schema.String),
 });
 
-const r2Get = Rpc.make("r2Get", {
-  payload: { bucket: Schema.String, key: Schema.String },
-  success: Schema.NullOr(R2GetResult),
-});
-
-const r2Put = Rpc.make("r2Put", {
-  payload: {
-    bucket: Schema.String,
-    key: Schema.String,
-    base64Body: Schema.String,
-    httpMetadata: Schema.optional(StringRecord),
-    customMetadata: Schema.optional(StringRecord),
-  },
-  success: R2ObjectInfo,
-});
-
-const r2Delete = Rpc.make("r2Delete", {
-  payload: {
-    bucket: Schema.String,
-    keys: Schema.Array(Schema.String),
-  },
-  success: Schema.Void,
-});
-
-const r2Head = Rpc.make("r2Head", {
-  payload: { bucket: Schema.String, key: Schema.String },
-  success: Schema.NullOr(R2ObjectInfo),
-});
-
-const r2List = Rpc.make("r2List", {
-  payload: {
-    bucket: Schema.String,
-    limit: Schema.optional(Schema.Number),
-    prefix: Schema.optional(Schema.String),
-    cursor: Schema.optional(Schema.String),
-    delimiter: Schema.optional(Schema.String),
-    startAfter: Schema.optional(Schema.String),
-  },
-  success: R2ListResult,
-});
-
-export class R2Rpcs extends RpcGroup.make(
-  r2Get,
-  r2Put,
-  r2Delete,
-  r2Head,
-  r2List,
-) {}
-
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+export const R2_INFO_HEADER = "x-alchemy-r2-info";
+export const R2_HTTP_METADATA_HEADER = "x-alchemy-r2-http-metadata";
+export const R2_CUSTOM_METADATA_HEADER = "x-alchemy-r2-custom-metadata";
+
+const decodeR2ObjectInfo = Schema.decodeUnknownSync(R2ObjectInfo);
+const decodeR2ListResult = Schema.decodeUnknownSync(R2ListResult);
 
 export function serializeR2Object(obj: cf.R2Object): R2ObjectInfo {
   const httpMetadata = obj.httpMetadata
@@ -124,69 +68,34 @@ export function serializeR2Object(obj: cf.R2Object): R2ObjectInfo {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Server-side handlers (runs inside the proxy worker)
-// ---------------------------------------------------------------------------
+export function encodeR2HeaderValue(value: unknown): string {
+  return encodeURIComponent(JSON.stringify(value));
+}
 
-export const makeR2Handlers = (env: Record<string, any>) =>
-  R2Rpcs.toLayer({
-    r2Get: ({ bucket, key }) =>
-      Effect.tryPromise(async () => {
-        const r2: cf.R2Bucket = env[bucket];
-        const obj = await r2.get(key);
-        if (!obj) return null;
-        const bytes = await obj.arrayBuffer();
-        const base64Body = btoa(
-          String.fromCharCode(...new Uint8Array(bytes)),
-        );
-        return { ...serializeR2Object(obj), base64Body };
-      }),
-    r2Put: ({ bucket, key, base64Body, httpMetadata, customMetadata }) =>
-      Effect.tryPromise(async () => {
-        const r2: cf.R2Bucket = env[bucket];
-        const body = Uint8Array.from(atob(base64Body), (c) => c.charCodeAt(0));
-        const obj = await r2.put(key, body, {
-          httpMetadata: httpMetadata as Record<string, string> | undefined,
-          customMetadata: customMetadata as Record<string, string> | undefined,
-        });
-        return serializeR2Object(obj!);
-      }),
-    r2Delete: ({ bucket, keys }) =>
-      Effect.tryPromise(async () => {
-        const r2: cf.R2Bucket = env[bucket];
-        await r2.delete(keys as string[]);
-      }),
-    r2Head: ({ bucket, key }) =>
-      Effect.tryPromise(async () => {
-        const r2: cf.R2Bucket = env[bucket];
-        const obj = await r2.head(key);
-        if (!obj) return null;
-        return serializeR2Object(obj);
-      }),
-    r2List: ({ bucket, ...options }) =>
-      Effect.tryPromise(async () => {
-        const r2: cf.R2Bucket = env[bucket];
-        const result = await r2.list(options);
-        return {
-          objects: result.objects.map(serializeR2Object),
-          truncated: result.truncated,
-          cursor: result.truncated ? result.cursor : undefined,
-          delimitedPrefixes: result.delimitedPrefixes,
-        };
-      }),
-  });
+export function decodeR2HeaderValue<T>(value: string | null): T | undefined {
+  if (value === null) {
+    return undefined;
+  }
+  return JSON.parse(decodeURIComponent(value)) as T;
+}
 
 // ---------------------------------------------------------------------------
 // Client-side facade (runs locally)
 // ---------------------------------------------------------------------------
 
-type R2RpcClient = RpcClient.RpcClient<RpcGroup.Rpcs<typeof R2Rpcs>, any>;
+export type R2PutValue =
+  | ReadableStream<Uint8Array>
+  | ArrayBuffer
+  | ArrayBufferView
+  | string
+  | null
+  | Blob;
 
 export interface R2BucketFacade {
   get(key: string): Promise<R2ObjectBodyFacade | null>;
   put(
     key: string,
-    value: string | ArrayBuffer | Uint8Array,
+    value: R2PutValue,
     options?: {
       httpMetadata?: Record<string, string>;
       customMetadata?: Record<string, string>;
@@ -210,88 +119,199 @@ export interface R2BucketFacade {
 
 export interface R2ObjectBodyFacade extends R2ObjectInfo {
   readonly body: ReadableStream<Uint8Array>;
+  readonly bodyUsed: boolean;
   text(): Promise<string>;
   arrayBuffer(): Promise<ArrayBuffer>;
+  bytes(): Promise<Uint8Array>;
   json<T>(): Promise<T>;
+  blob(): Promise<Blob>;
 }
 
-function toBase64(value: string | ArrayBuffer | Uint8Array): string {
-  if (typeof value === "string") {
-    return btoa(value);
-  }
-  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-  return btoa(String.fromCharCode(...bytes));
+function makeObjectUrl(workerUrl: string, bucket: string, key: string): string {
+  const params = new URLSearchParams({ bucket, key });
+  return `${workerUrl}/r2/object?${params.toString()}`;
 }
 
-function fromBase64(b64: string): Uint8Array {
-  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-}
-
-export function makeR2Facade(
-  client: R2RpcClient,
+function makeListUrl(
+  workerUrl: string,
   bucket: string,
-): R2BucketFacade {
+  options?: {
+    limit?: number;
+    prefix?: string;
+    cursor?: string;
+    delimiter?: string;
+    startAfter?: string;
+  },
+): string {
+  const params = new URLSearchParams({ bucket });
+  if (options?.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  if (options?.prefix !== undefined) {
+    params.set("prefix", options.prefix);
+  }
+  if (options?.cursor !== undefined) {
+    params.set("cursor", options.cursor);
+  }
+  if (options?.delimiter !== undefined) {
+    params.set("delimiter", options.delimiter);
+  }
+  if (options?.startAfter !== undefined) {
+    params.set("startAfter", options.startAfter);
+  }
+  return `${workerUrl}/r2/list?${params.toString()}`;
+}
+
+function makeEmptyBodyStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.close();
+    },
+  });
+}
+
+function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
+  return typeof ReadableStream !== "undefined" && value instanceof ReadableStream;
+}
+
+function normalizeUploadBody(value: R2PutValue): BodyInit | null {
+  if (value === null || typeof value === "string" || value instanceof Blob) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return value;
+  }
+  if (ArrayBuffer.isView(value)) {
+    const copy = new Uint8Array(value.byteLength);
+    copy.set(
+      new Uint8Array(
+        value.buffer as ArrayBuffer,
+        value.byteOffset,
+        value.byteLength,
+      ),
+    );
+    return copy;
+  }
+  return value;
+}
+
+async function throwIfNotOk(response: Response): Promise<void> {
+  if (response.ok) {
+    return;
+  }
+  const body = await response.text().catch(() => "");
+  throw new Error(
+    `R2 request failed: ${response.status} ${response.statusText}${body ? ` - ${body}` : ""}`,
+  );
+}
+
+function getObjectInfoFromHeaders(headers: Headers): R2ObjectInfo {
+  const raw = decodeR2HeaderValue<unknown>(headers.get(R2_INFO_HEADER));
+  if (raw === undefined) {
+    throw new Error("Missing R2 metadata header");
+  }
+  return decodeR2ObjectInfo(raw);
+}
+
+function makeObjectBodyFacade(
+  response: Response,
+  info: R2ObjectInfo,
+): R2ObjectBodyFacade {
+  return {
+    ...info,
+    get body() {
+      return (response.body as ReadableStream<Uint8Array> | null) ?? makeEmptyBodyStream();
+    },
+    get bodyUsed() {
+      return response.bodyUsed;
+    },
+    text() {
+      return response.text();
+    },
+    arrayBuffer() {
+      return response.arrayBuffer();
+    },
+    async bytes() {
+      return new Uint8Array(await response.arrayBuffer());
+    },
+    json<T>() {
+      return response.json() as Promise<T>;
+    },
+    blob() {
+      return response.blob();
+    },
+  };
+}
+
+export function makeR2Facade(workerUrl: string, bucket: string): R2BucketFacade {
   return {
     async get(key) {
-      const result = await runWorkerRpc(client.r2Get({ bucket, key }));
-      if (!result) return null;
-      const { base64Body, ...info } = result;
-      const bytes = base64Body ? fromBase64(base64Body) : new Uint8Array(0);
-      const stream = new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(bytes);
-          controller.close();
-        },
-      });
-      return {
-        ...info,
-        body: stream,
-        async text() {
-          return new TextDecoder().decode(bytes);
-        },
-        async arrayBuffer() {
-          return bytes.buffer as ArrayBuffer;
-        },
-        async json<T>() {
-          return JSON.parse(new TextDecoder().decode(bytes)) as T;
-        },
-      };
+      const response = await fetch(makeObjectUrl(workerUrl, bucket, key));
+      if (response.status === 404) {
+        return null;
+      }
+      await throwIfNotOk(response);
+      return makeObjectBodyFacade(response, getObjectInfoFromHeaders(response.headers));
     },
     async put(key, value, options) {
-      return runWorkerRpc(
-        client.r2Put({
-          bucket,
-          key,
-          base64Body: toBase64(value),
-          httpMetadata: options?.httpMetadata,
-          customMetadata: options?.customMetadata,
-        }),
-      );
+      const response = await fetch(makeObjectUrl(workerUrl, bucket, key), {
+        method: "PUT",
+        headers: {
+          ...(options?.httpMetadata
+            ? {
+                [R2_HTTP_METADATA_HEADER]: encodeR2HeaderValue(
+                  options.httpMetadata,
+                ),
+              }
+            : {}),
+          ...(options?.customMetadata
+            ? {
+                [R2_CUSTOM_METADATA_HEADER]: encodeR2HeaderValue(
+                  options.customMetadata,
+                ),
+              }
+            : {}),
+        },
+        body: normalizeUploadBody(value),
+        ...(isReadableStream(value)
+          ? ({ duplex: "half" } as RequestInit)
+          : {}),
+      });
+      await throwIfNotOk(response);
+      return decodeR2ObjectInfo(await response.json());
     },
     async delete(keys) {
       const keyArray = typeof keys === "string" ? [keys] : keys;
-      await runWorkerRpc(client.r2Delete({ bucket, keys: keyArray }));
+      const response = await fetch(`${workerUrl}/r2/object`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ bucket, keys: keyArray }),
+      });
+      await throwIfNotOk(response);
     },
     async head(key) {
-      return runWorkerRpc(client.r2Head({ bucket, key }));
+      const response = await fetch(makeObjectUrl(workerUrl, bucket, key), {
+        method: "HEAD",
+      });
+      if (response.status === 404) {
+        return null;
+      }
+      await throwIfNotOk(response);
+      return getObjectInfoFromHeaders(response.headers);
     },
     async list(options) {
-      return runWorkerRpc(client.r2List({ bucket, ...options }));
+      const response = await fetch(makeListUrl(workerUrl, bucket, options));
+      await throwIfNotOk(response);
+      return decodeR2ListResult(await response.json());
     },
   };
 }
 
 /**
- * Create an R2 RPC client connected to the proxy worker over HTTP.
+ * Create an R2 client connected to the proxy worker over HTTP.
  * Returns a factory for creating R2BucketFacade instances by binding name.
  */
 export const makeR2Client = (workerUrl: string) =>
-  Effect.gen(function* () {
-    const protocol = yield* makeWorkerRpcProtocol(workerUrl);
-    const client = yield* RpcClient.make(R2Rpcs).pipe(
-      Effect.provideService(RpcClient.Protocol, protocol),
-    );
-    return {
-      r2: (bucket: string) => makeR2Facade(client, bucket),
-    };
+  Effect.succeed({
+    r2: (bucket: string) => makeR2Facade(workerUrl, bucket),
   });

@@ -1,80 +1,9 @@
 import type * as cf from "@cloudflare/workers-types";
 import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
-import {
-  Rpc,
-  RpcClient,
-  RpcGroup,
-} from "effect/unstable/rpc";
-import {
-  makeWorkerRpcProtocol,
-  runWorkerRpc,
-} from "../http-rpc-client.ts";
 
 // ---------------------------------------------------------------------------
-// Schema: Channel C (HTTP RPC) -- sending messages
+// Client-side sender facade (runs locally)
 // ---------------------------------------------------------------------------
-
-const queueSend = Rpc.make("queueSend", {
-  payload: {
-    queue: Schema.String,
-    body: Schema.Unknown,
-    contentType: Schema.optional(Schema.String),
-    delaySeconds: Schema.optional(Schema.Number),
-  },
-  success: Schema.Void,
-});
-
-const queueSendBatch = Rpc.make("queueSendBatch", {
-  payload: {
-    queue: Schema.String,
-    messages: Schema.Array(
-      Schema.Struct({
-        body: Schema.Unknown,
-        contentType: Schema.optional(Schema.String),
-        delaySeconds: Schema.optional(Schema.Number),
-      }),
-    ),
-    delaySeconds: Schema.optional(Schema.Number),
-  },
-  success: Schema.Void,
-});
-
-export class QueueRpcs extends RpcGroup.make(queueSend, queueSendBatch) {}
-
-// ---------------------------------------------------------------------------
-// Server-side handlers (runs inside the proxy worker fetch handler)
-// ---------------------------------------------------------------------------
-
-export const makeQueueHandlers = (env: Record<string, any>) =>
-  QueueRpcs.toLayer({
-    queueSend: ({ queue: queueName, body, contentType, delaySeconds }) =>
-      Effect.tryPromise(async () => {
-        const q: cf.Queue = env[queueName];
-        await q.send(body as any, {
-          contentType: contentType as cf.QueueContentType | undefined,
-          delaySeconds,
-        });
-      }),
-    queueSendBatch: ({ queue: queueName, messages, delaySeconds }) =>
-      Effect.tryPromise(async () => {
-        const q: cf.Queue = env[queueName];
-        await q.sendBatch(
-          messages.map((m) => ({
-            body: m.body as any,
-            contentType: m.contentType as cf.QueueContentType | undefined,
-            delaySeconds: m.delaySeconds,
-          })),
-          { delaySeconds },
-        );
-      }),
-  });
-
-// ---------------------------------------------------------------------------
-// Client-side facade (runs locally) -- sending
-// ---------------------------------------------------------------------------
-
-type QueueRpcClient = RpcClient.RpcClient<RpcGroup.Rpcs<typeof QueueRpcs>, any>;
 
 export interface QueueFacade<Body = unknown> {
   send(
@@ -91,24 +20,39 @@ export interface QueueFacade<Body = unknown> {
   ): Promise<void>;
 }
 
+async function throwIfNotOk(response: Response): Promise<void> {
+  if (response.ok) {
+    return;
+  }
+  const body = await response.text().catch(() => "");
+  throw new Error(
+    `Queue request failed: ${response.status} ${response.statusText}${body ? ` - ${body}` : ""}`,
+  );
+}
+
 export function makeQueueFacade<Body = unknown>(
-  client: QueueRpcClient,
+  workerUrl: string,
   queue: string,
 ): QueueFacade<Body> {
   return {
     async send(message, options) {
-      await runWorkerRpc(
-        client.queueSend({
+      const response = await fetch(`${workerUrl}/queue/send`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
           queue,
           body: message,
           contentType: options?.contentType,
           delaySeconds: options?.delaySeconds,
         }),
-      );
+      });
+      await throwIfNotOk(response);
     },
     async sendBatch(messages, options) {
-      await runWorkerRpc(
-        client.queueSendBatch({
+      const response = await fetch(`${workerUrl}/queue/send-batch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
           queue,
           messages: messages.map((m) => ({
             body: m.body,
@@ -117,7 +61,8 @@ export function makeQueueFacade<Body = unknown>(
           })),
           delaySeconds: options?.delaySeconds,
         }),
-      );
+      });
+      await throwIfNotOk(response);
     },
   };
 }
@@ -221,17 +166,11 @@ export const makeQueueConsumer = <Body = unknown>(
 });
 
 // ---------------------------------------------------------------------------
-// HTTP RPC client factory (for sending)
+// Queue sender client factory
 // ---------------------------------------------------------------------------
 
 export const makeQueueClient = (workerUrl: string) =>
-  Effect.gen(function* () {
-    const protocol = yield* makeWorkerRpcProtocol(workerUrl);
-    const client = yield* RpcClient.make(QueueRpcs).pipe(
-      Effect.provideService(RpcClient.Protocol, protocol),
-    );
-    return {
-      queue: <Body = unknown>(queueName: string) =>
-        makeQueueFacade<Body>(client, queueName),
-    };
+  Effect.succeed({
+    queue: <Body = unknown>(queueName: string) =>
+      makeQueueFacade<Body>(workerUrl, queueName),
   });

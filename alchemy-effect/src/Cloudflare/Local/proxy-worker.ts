@@ -11,40 +11,22 @@ import type * as cf from "@cloudflare/workers-types";
 import { DurableObject } from "cloudflare:workers";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
-import type { Scope } from "effect/Scope";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { RpcClient, RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import { RpcClient, RpcServer } from "effect/unstable/rpc";
+import { type QueueBatchDecision } from "./Bindings/queue.ts";
 import {
-  QueueRpcs,
-  type QueueBatchDecision,
-  makeQueueHandlers,
-} from "./Bindings/queue.ts";
-import { R2Rpcs, makeR2Handlers } from "./Bindings/r2.ts";
+  R2_CUSTOM_METADATA_HEADER,
+  R2_HTTP_METADATA_HEADER,
+  R2_INFO_HEADER,
+  decodeR2HeaderValue,
+  encodeR2HeaderValue,
+  serializeR2Object,
+} from "./Bindings/r2.ts";
 import {
   type HibernatableProtocols,
   makeHibernatableProtocols,
   routeMessage,
 } from "./rpc-protocol.ts";
 import { LocalRpcs, RemoteRpcs } from "./rpc-schema.ts";
-
-function serveRpcRequest(
-  webRequest: Request,
-  handler: Effect.Effect<
-    HttpServerResponse.HttpServerResponse,
-    any,
-    HttpServerRequest.HttpServerRequest | Scope
-  >,
-) {
-  return Effect.gen(function* () {
-    const request = HttpServerRequest.fromWeb(webRequest);
-    const response = yield* handler.pipe(
-      Effect.provideService(HttpServerRequest.HttpServerRequest, request),
-    );
-    const services = yield* Effect.services();
-    return HttpServerResponse.toWeb(response, { services });
-  });
-}
 
 interface Env {
   SESSION: DurableObjectNamespace<Session>;
@@ -61,9 +43,7 @@ function rpcSerializableBody(body: unknown): unknown {
   }
   if (ArrayBuffer.isView(body)) {
     const v = body as ArrayBufferView;
-    return Array.from(
-      new Uint8Array(v.buffer, v.byteOffset, v.byteLength),
-    );
+    return Array.from(new Uint8Array(v.buffer, v.byteOffset, v.byteLength));
   }
   try {
     return JSON.parse(JSON.stringify(body)) as unknown;
@@ -72,26 +52,169 @@ function rpcSerializableBody(body: unknown): unknown {
   }
 }
 
-function makeRpcHandler(env: Env) {
-  const combined = R2Rpcs.merge(QueueRpcs);
-  return RpcServer.toHttpEffect(combined).pipe(
-    Effect.provide(makeR2Handlers(env)),
-    Effect.provide(makeQueueHandlers(env)),
-    Effect.provide(RpcSerialization.layerJson),
-  );
+function jsonResponse(body: unknown, init?: ResponseInit): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+}
+
+async function handleR2Request(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/r2/object") {
+    if (request.method === "DELETE") {
+      const payload = (await request.json()) as {
+        bucket: string;
+        keys: string[];
+      };
+      const r2: cf.R2Bucket = env[payload.bucket] as cf.R2Bucket;
+      await r2.delete(payload.keys);
+      return new Response(null, { status: 204 });
+    }
+
+    const bucket = url.searchParams.get("bucket");
+    const key = url.searchParams.get("key");
+    if (!bucket || !key) {
+      return new Response("Missing bucket or key", { status: 400 });
+    }
+
+    const r2: cf.R2Bucket = env[bucket] as cf.R2Bucket;
+
+    if (request.method === "HEAD") {
+      const obj = await r2.head(key);
+      if (!obj) {
+        return new Response("Not Found", { status: 404 });
+      }
+      return new Response(null, {
+        headers: {
+          [R2_INFO_HEADER]: encodeR2HeaderValue(serializeR2Object(obj)),
+        },
+      });
+    }
+
+    if (request.method === "GET") {
+      const obj = await r2.get(key);
+      if (!obj) {
+        return new Response("Not Found", { status: 404 });
+      }
+      return new Response(obj.body as unknown as BodyInit, {
+        headers: {
+          [R2_INFO_HEADER]: encodeR2HeaderValue(serializeR2Object(obj)),
+        },
+      });
+    }
+
+    if (request.method === "PUT") {
+      const httpMetadata = decodeR2HeaderValue<Record<string, string>>(
+        request.headers.get(R2_HTTP_METADATA_HEADER),
+      );
+      const customMetadata = decodeR2HeaderValue<Record<string, string>>(
+        request.headers.get(R2_CUSTOM_METADATA_HEADER),
+      );
+      const obj = await r2.put(
+        key,
+        request.body as unknown as cf.ReadableStream<any> | null,
+        {
+          httpMetadata,
+          customMetadata,
+        },
+      );
+      if (!obj) {
+        return new Response("R2 put returned null", { status: 412 });
+      }
+      return jsonResponse(serializeR2Object(obj));
+    }
+  }
+
+  if (url.pathname === "/r2/list" && request.method === "GET") {
+    const bucket = url.searchParams.get("bucket");
+    if (!bucket) {
+      return new Response("Missing bucket", { status: 400 });
+    }
+    const r2: cf.R2Bucket = env[bucket] as cf.R2Bucket;
+    const limit = url.searchParams.get("limit");
+    const result = await r2.list({
+      limit: limit === null ? undefined : Number(limit),
+      prefix: url.searchParams.get("prefix") ?? undefined,
+      cursor: url.searchParams.get("cursor") ?? undefined,
+      delimiter: url.searchParams.get("delimiter") ?? undefined,
+      startAfter: url.searchParams.get("startAfter") ?? undefined,
+    });
+    return jsonResponse({
+      objects: result.objects.map(serializeR2Object),
+      truncated: result.truncated,
+      cursor: result.truncated ? result.cursor : undefined,
+      delimitedPrefixes: result.delimitedPrefixes,
+    });
+  }
+
+  return new Response("Not Found", { status: 404 });
+}
+
+async function handleQueueRequest(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  if (
+    request.method === "POST" &&
+    new URL(request.url).pathname === "/queue/send"
+  ) {
+    const payload = (await request.json()) as {
+      queue: string;
+      body: unknown;
+      contentType?: string;
+      delaySeconds?: number;
+    };
+    const queue: cf.Queue = env[payload.queue] as cf.Queue;
+    await queue.send(payload.body as any, {
+      contentType: payload.contentType as cf.QueueContentType | undefined,
+      delaySeconds: payload.delaySeconds,
+    });
+    return new Response(null, { status: 204 });
+  }
+
+  if (
+    request.method === "POST" &&
+    new URL(request.url).pathname === "/queue/send-batch"
+  ) {
+    const payload = (await request.json()) as {
+      queue: string;
+      messages: Array<{
+        body: unknown;
+        contentType?: string;
+        delaySeconds?: number;
+      }>;
+      delaySeconds?: number;
+    };
+    const queue: cf.Queue = env[payload.queue] as cf.Queue;
+    await queue.sendBatch(
+      payload.messages.map((message) => ({
+        body: message.body as any,
+        contentType: message.contentType as cf.QueueContentType | undefined,
+        delaySeconds: message.delaySeconds,
+      })),
+      { delaySeconds: payload.delaySeconds },
+    );
+    return new Response(null, { status: 204 });
+  }
+
+  return new Response("Not Found", { status: 404 });
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/rpc" || url.pathname === "/rpc/") {
-      return Effect.runPromise(
-        makeRpcHandler(env).pipe(
-          Effect.flatMap((handler) => serveRpcRequest(request, handler)),
-          Effect.scoped,
-        ),
-      );
+    if (url.pathname.startsWith("/r2/")) {
+      return handleR2Request(request, env);
+    }
+
+    if (url.pathname.startsWith("/queue/")) {
+      return handleQueueRequest(request, env);
     }
 
     if (url.pathname === "/ws") {
@@ -140,9 +263,7 @@ export default {
       console.log("[worker.queue] ackAll()");
       batch.ackAll();
     } else if (result.retryAll) {
-      console.log(
-        `[worker.queue] retryAll(${String(result.retryAllDelay)})`,
-      );
+      console.log(`[worker.queue] retryAll(${String(result.retryAllDelay)})`);
       batch.retryAll(
         result.retryAllDelay
           ? { delaySeconds: result.retryAllDelay }
@@ -238,13 +359,17 @@ export class Session extends DurableObject<Env> {
    * deadlock. Instead we fork the call (fire-and-forget) and ack all messages
    * immediately. The local handler still receives every message.
    */
-  async proxyQueueBatch(body: ProxyQueueBatchInput): Promise<QueueBatchDecision> {
+  async proxyQueueBatch(
+    body: ProxyQueueBatchInput,
+  ): Promise<QueueBatchDecision> {
     console.log(
       `[Session.proxyQueueBatch] queue=${body.queue} msgs=${body.messages.length}`,
     );
 
     if (!(await this.waitForActiveSession("proxyQueueBatch"))) {
-      console.error("[Session.proxyQueueBatch] no localClient after ensureRuntime");
+      console.error(
+        "[Session.proxyQueueBatch] no localClient after ensureRuntime",
+      );
       throw new Error("No active WebSocket session — CF will retry");
     }
 
@@ -382,7 +507,10 @@ export class Session extends DurableObject<Env> {
     ws: WebSocket,
     message: string | ArrayBuffer,
   ): Promise<void> {
-    const size = typeof message === "string" ? message.length : (message as ArrayBuffer).byteLength;
+    const size =
+      typeof message === "string"
+        ? message.length
+        : (message as ArrayBuffer).byteLength;
     console.log(`[Session.webSocketMessage] ${size} bytes`);
     await this.ensureRuntime(ws);
     routeMessage(this.protocols!, message);

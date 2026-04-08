@@ -474,7 +474,7 @@ describe.sequential("Cloudflare Local RPC", () => {
   );
 
   it.live(
-    "R2 binding proxy over HTTP RPC",
+    "R2 binding proxy over HTTP",
     () =>
       Effect.gen(function* () {
         const accountId = yield* Account;
@@ -501,20 +501,35 @@ describe.sequential("Cloudflare Local RPC", () => {
           const { r2 } = yield* makeR2Client(workerUrl);
           const bucket = r2("BUCKET");
 
-          yield* Effect.logInfo("Testing r2 put...");
+          yield* Effect.logInfo("Testing streaming r2 put...");
+          const encoder = new TextEncoder();
+          const uploadStream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode("Hello, "));
+              controller.enqueue(encoder.encode("R2!"));
+              controller.close();
+            },
+          });
           const putResult = yield* Effect.promise(() =>
-            bucket.put("hello.txt", "Hello, R2!"),
+            bucket.put("hello.txt", uploadStream, {
+              httpMetadata: { contentType: "text/plain" },
+              customMetadata: { source: "stream" },
+            }),
           );
           expect(putResult.key).toBe("hello.txt");
           expect(putResult.size).toBeGreaterThan(0);
           yield* Effect.logInfo(`Put hello.txt, size=${putResult.size}`);
 
-          yield* Effect.logInfo("Testing r2 get...");
+          yield* Effect.logInfo("Testing streaming r2 get...");
           const getResult = yield* Effect.promise(() =>
             bucket.get("hello.txt"),
           );
           expect(getResult).not.toBeNull();
-          const text = yield* Effect.promise(() => getResult!.text());
+          expect(getResult!.body).toBeInstanceOf(ReadableStream);
+          expect(getResult!.customMetadata?.source).toBe("stream");
+          const text = yield* Effect.promise(() =>
+            new Response(getResult!.body).text(),
+          );
           expect(text).toBe("Hello, R2!");
           yield* Effect.logInfo(`Get hello.txt, body="${text}"`);
 
@@ -525,6 +540,7 @@ describe.sequential("Cloudflare Local RPC", () => {
           expect(headResult).not.toBeNull();
           expect(headResult!.key).toBe("hello.txt");
           expect(headResult!.size).toBe(putResult.size);
+          expect(headResult!.customMetadata?.source).toBe("stream");
           yield* Effect.logInfo(`Head hello.txt, size=${headResult!.size}`);
 
           yield* Effect.logInfo("Testing r2 list...");
@@ -557,7 +573,7 @@ describe.sequential("Cloudflare Local RPC", () => {
   );
 
   it.live(
-    "Queue binding: send via HTTP RPC, receive via WebSocket RPC",
+    "Queue binding: send via HTTP, receive via WebSocket RPC",
     () =>
       Effect.gen(function* () {
         const accountId = yield* Account;
