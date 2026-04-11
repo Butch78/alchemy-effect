@@ -2,6 +2,7 @@ import { Account } from "@/Cloudflare/Account";
 import * as Cloudflare from "@/Cloudflare/index.ts";
 import * as R2 from "@/Cloudflare/R2";
 import { destroy } from "@/Destroy";
+import * as State from "@/State/index.ts";
 import { test } from "@/Test/Vitest";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import { expect } from "@effect/vitest";
@@ -212,6 +213,71 @@ test(
     );
 
     expect(updatedWorker.workerName).toEqual(worker.workerName);
+
+    yield* destroy();
+
+    yield* waitForWorkerToBeDeleted(worker.workerName, accountId);
+  }).pipe(Effect.provide(Cloudflare.providers()), logLevel),
+);
+
+test(
+  "recover from partially-created state",
+  Effect.gen(function* () {
+    const accountId = yield* Account;
+    const stack = yield* Stack;
+
+    yield* destroy();
+
+    const workerEffect = Effect.gen(function* () {
+      return yield* Cloudflare.Worker("RecoverWorker", {
+        main,
+        subdomain: { enabled: true, previewsEnabled: true },
+        compatibility: {
+          date: "2024-01-01",
+        },
+      });
+    });
+
+    // Deploy the worker normally so it exists on Cloudflare
+    const worker = yield* test.deploy(workerEffect);
+
+    const actualWorker = yield* findWorker(worker.workerName, accountId);
+    expect(actualWorker?.scriptName).toEqual(worker.workerName);
+
+    // Simulate a partially-failed first deploy by resetting state to "creating"
+    // with no output attributes (attr), as would happen if the deploy succeeded
+    // on Cloudflare but state persistence failed before marking "created".
+    const state = yield* State.State.asEffect();
+    const existing = yield* state.get({
+      stack: stack.name,
+      stage: stack.stage,
+      fqn: "RecoverWorker",
+    });
+    expect(existing).toBeDefined();
+    yield* state.set({
+      stack: stack.name,
+      stage: stack.stage,
+      fqn: "RecoverWorker",
+      value: {
+        resourceType: existing!.resourceType,
+        namespace: existing!.namespace,
+        fqn: existing!.fqn,
+        logicalId: existing!.logicalId,
+        instanceId: existing!.instanceId,
+        providerVersion: existing!.providerVersion,
+        downstream: existing!.downstream,
+        bindings: existing!.bindings,
+        removalPolicy: existing!.removalPolicy,
+        status: "creating" as const,
+        props: existing!.props ?? {},
+      },
+    });
+
+    // Redeploy — should recover by adopting the existing worker instead of
+    // failing with "already exists but is not owned by this stack/stage/resource"
+    const recovered = yield* test.deploy(workerEffect);
+
+    expect(recovered.workerName).toEqual(worker.workerName);
 
     yield* destroy();
 
