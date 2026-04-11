@@ -22,5 +22,9 @@ jobs:
       - name: Build
         run: bun run build
 
+      - name: Build
+        run: bun run build
+        working-directory: packages/better-auth
+
       - name: Publish
         run: bun pkg-pr-new publish --bun ./alchemy-effect ./packages/better-auth
