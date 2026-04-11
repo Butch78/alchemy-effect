@@ -13,3 +13,6 @@
 [submodule "vendor/containers"]
 	path = vendor/containers
 	url = git@github.com:cloudflare/containers.git
+[submodule "examples/cloudflare-solidstart/solid-start-fork"]
+	path = examples/cloudflare-solidstart/solid-start-fork
+	url = https://github.com/birkskyum/solid-start.git

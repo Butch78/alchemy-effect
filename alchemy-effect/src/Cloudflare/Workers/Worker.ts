@@ -1,6 +1,5 @@
 import type * as cf from "@cloudflare/workers-types";
 import cloudflareRolldown from "@distilled.cloud/cloudflare-rolldown-plugin";
-import cloudflareVite from "@distilled.cloud/cloudflare-vite-plugin";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -31,7 +30,7 @@ import {
   Platform,
   type Main,
   type PlatformProps,
-  type Rpc,
+  type Rpc
 } from "../../Platform.ts";
 import type { LogLine } from "../../Provider.ts";
 import { Resource, type ResourceBinding } from "../../Resource.ts";
@@ -662,11 +661,11 @@ ${[
             {
               root: props.vite?.rootDir,
               plugins: [
-                cloudflareVite({
-                  compatibilityDate:
-                    props.compatibility?.date ?? defaultCompatibilityDate,
-                  compatibilityFlags: props.compatibility?.flags,
-                }),
+                // cloudflareVite({
+                //   compatibilityDate:
+                //     props.compatibility?.date ?? defaultCompatibilityDate,
+                //   compatibilityFlags: props.compatibility?.flags,
+                // }),
                 {
                   name: "output:ssr",
                   applyToEnvironment(environment) {
