@@ -75,3 +75,28 @@ export const providers = () =>
  * Cloudflare account credentials and auth context.
  */
 export const credentials = () => Account.fromStageConfig();
+
+/**
+ * All Cloudflare resource providers.
+ */
+export const resources = () =>
+  Layer.mergeAll(
+    Build.CommandProvider(),
+    RandomProvider(),
+    Containers.ContainerProvider(),
+    Workers.WorkerProvider(),
+    Workflows.WorkflowProvider(),
+    D1.DatabaseProvider(),
+    KV.KVNamespaceProvider(),
+    R2.R2BucketProvider(),
+  );
+
+/**
+ * All Cloudflare binding policies.
+ */
+export const bindings = () =>
+  Layer.mergeAll(
+    D1.D1ConnectionPolicyLive,
+    R2.R2BucketBindingPolicyLive,
+    KV.KVNamespaceBindingPolicyLive,
+  );
