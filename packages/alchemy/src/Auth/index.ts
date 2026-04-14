@@ -2,7 +2,9 @@ import * as p from "@clack/prompts";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import type * as Path from "effect/Path";
 import type { PlatformError } from "effect/PlatformError";
+import type * as HttpClient from "effect/unstable/http/HttpClient";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 import type { AwsLoginError } from "./AWS/index.ts";
 import * as AWS from "./AWS/index.ts";
@@ -60,25 +62,38 @@ export const layer = (profileName: string) =>
       Effect.map((profile) => {
         if (!profile) return Layer.empty;
 
-        const layers: Layer.Layer<any, any, any>[] = [];
+        const awsLayer = profile.aws
+          ? Layer.merge(
+              AWS.credentialsLayer(profileName, profile.aws),
+              AWS.stageConfigLayer(profile.aws),
+            )
+          : undefined;
 
-        if (profile.aws) {
-          layers.push(AWS.credentialsLayer(profileName, profile.aws));
-          layers.push(AWS.stageConfigLayer(profile.aws));
-        }
-        if (profile.cloudflare) {
-          layers.push(
-            Cloudflare.credentialsLayer(profileName, profile.cloudflare),
-          );
-          layers.push(Cloudflare.stageConfigLayer(profile.cloudflare));
-        }
+        const cfLayer = profile.cloudflare
+          ? Layer.merge(
+              Cloudflare.credentialsLayer(profileName, profile.cloudflare),
+              Cloudflare.stageConfigLayer(profile.cloudflare),
+            )
+          : undefined;
 
-        if (layers.length === 0) return Layer.empty;
-        if (layers.length === 1) return layers[0]!;
-        return Layer.mergeAll(layers[0]!, ...layers.slice(1));
+        if (awsLayer && cfLayer) return Layer.merge(awsLayer, cfLayer);
+        if (awsLayer) return awsLayer;
+        if (cfLayer) return cfLayer;
+        return Layer.empty;
       }),
     ),
   );
+
+type AllErrors =
+  | AwsLoginError
+  | Cloudflare.OAuthClient.OAuthError
+  | PlatformError;
+
+type AllRequirements =
+  | FileSystem.FileSystem
+  | ChildProcessSpawner
+  | Path.Path
+  | HttpClient.HttpClient;
 
 const configureProvider = (
   key: ProviderKey,
@@ -86,8 +101,8 @@ const configureProvider = (
   isReconfigure: boolean,
 ): Effect.Effect<
   AWS.AwsAuthConfig | Cloudflare.CloudflareAuthConfig | "remove" | undefined,
-  PlatformError,
-  FileSystem.FileSystem | ChildProcessSpawner
+  AllErrors,
+  AllRequirements
 > => {
   return providers[key].configure(profileName, isReconfigure);
 };
@@ -95,7 +110,7 @@ const configureProvider = (
 const loginProvider = (
   key: ProviderKey,
   config: AWS.AwsAuthConfig | Cloudflare.CloudflareAuthConfig,
-): Effect.Effect<void, AwsLoginError | Cloudflare.OAuthClient.OAuthError | PlatformError, FileSystem.FileSystem | ChildProcessSpawner> => {
+): Effect.Effect<void, AllErrors, AllRequirements> => {
   if (key === "aws") return AWS.login(config as AWS.AwsAuthConfig);
   return Cloudflare.login(config as Cloudflare.CloudflareAuthConfig);
 };
@@ -104,7 +119,7 @@ const logoutProvider = (
   key: ProviderKey,
   profileName: string,
   config: AWS.AwsAuthConfig | Cloudflare.CloudflareAuthConfig,
-): Effect.Effect<void, never, FileSystem.FileSystem> => {
+): Effect.Effect<void, never, AllRequirements> => {
   if (key === "aws")
     return AWS.logout(profileName, config as AWS.AwsAuthConfig);
   return Cloudflare.logout(
@@ -117,8 +132,8 @@ export const configure = (
   profileName: string,
 ): Effect.Effect<
   boolean,
-  AwsLoginError | Cloudflare.OAuthClient.OAuthError | PlatformError,
-  FileSystem.FileSystem | ChildProcessSpawner
+  AllErrors,
+  AllRequirements
 > =>
   Effect.gen(function* () {
     const existing = yield* getProfile(profileName);
@@ -136,8 +151,8 @@ const configureFirstTime = (
   profileName: string,
 ): Effect.Effect<
   boolean,
-  AwsLoginError | Cloudflare.OAuthClient.OAuthError | PlatformError,
-  FileSystem.FileSystem | ChildProcessSpawner
+  AllErrors,
+  AllRequirements
 > =>
   Effect.gen(function* () {
     const selected = yield* Effect.promise(() =>
@@ -187,8 +202,8 @@ const configureExisting = (
   existing: AlchemyProfile,
 ): Effect.Effect<
   boolean,
-  AwsLoginError | Cloudflare.OAuthClient.OAuthError | PlatformError,
-  FileSystem.FileSystem | ChildProcessSpawner
+  AllErrors,
+  AllRequirements
 > =>
   Effect.gen(function* () {
     const enabled = ALL_PROVIDERS.filter((k) => existing[k]);
@@ -273,7 +288,7 @@ const configureExisting = (
 
 export const login = (
   profileName: string,
-): Effect.Effect<void, AwsLoginError | Cloudflare.OAuthClient.OAuthError | PlatformError, FileSystem.FileSystem | ChildProcessSpawner> =>
+): Effect.Effect<void, AllErrors, AllRequirements> =>
   Effect.gen(function* () {
     const profile = yield* getProfile(profileName);
 
@@ -304,7 +319,7 @@ export const login = (
 
 export const logout = (
   profileName: string,
-): Effect.Effect<void, never, FileSystem.FileSystem> =>
+): Effect.Effect<void, never, AllRequirements> =>
   Effect.gen(function* () {
     const profile = yield* getProfile(profileName);
 
@@ -335,7 +350,7 @@ export const logout = (
 
 export const viewAuth = (
   profileName: string,
-): Effect.Effect<void, never, FileSystem.FileSystem> =>
+): Effect.Effect<void, never, AllRequirements> =>
   Effect.gen(function* () {
     const profile = yield* getProfile(profileName);
 

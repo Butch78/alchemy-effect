@@ -1,38 +1,28 @@
 import type * as Effect from "effect/Effect";
-import type * as FileSystem from "effect/FileSystem";
 import type * as Layer from "effect/Layer";
-import type { PlatformError } from "effect/PlatformError";
-import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 
-export interface AuthProvider<Config> {
+export interface AuthProvider<Config, Credentials> {
   readonly name: string;
 
   configure(
     profileName: string,
     isReconfigure: boolean,
-  ): Effect.Effect<
-    Config | "remove" | undefined,
-    PlatformError,
-    FileSystem.FileSystem | ChildProcessSpawner
-  >;
+  ): Effect.Effect<Config | "remove" | undefined>;
 
-  login(
-    config: Config,
-  ): Effect.Effect<void, any, FileSystem.FileSystem | ChildProcessSpawner>;
+  login(config: Config): Effect.Effect<void>;
 
   logout(
     profileName: string,
     config: Config,
-  ): Effect.Effect<void, never, FileSystem.FileSystem>;
+  ): Effect.Effect<void>;
 
   viewAuth(
     profileName: string,
     config: Config,
-    extra?: any,
-  ): Effect.Effect<void, never, FileSystem.FileSystem>;
+  ): Effect.Effect<void>;
 
   credentialsLayer(
     profileName: string,
     config: Config,
-  ): Layer.Layer<any, any, any>;
+  ): Layer.Layer<Credentials>;
 }
