@@ -228,6 +228,7 @@
         "@ai-sdk/anthropic": "^3.0.31",
         "@ai-sdk/openai": "^3.0.23",
         "@ai-sdk/provider": "^3.0.8",
+        "@alchemy.run/cloudflare-state-store": "workspace:*",
         "@aws-sdk/credential-providers": "catalog:",
         "@clack/prompts": "^0.11.0",
         "@distilled.cloud/aws": "catalog:",
@@ -300,6 +301,13 @@
         "alchemy": "workspace:*",
         "better-auth": "catalog:",
         "effect": "catalog:",
+      },
+    },
+    "services/cloudflare-state-store": {
+      "name": "@alchemy.run/cloudflare-state-store",
+      "version": "0.0.0",
+      "dependencies": {
+        "@cloudflare/workers-types": "catalog:",
       },
     },
     "website": {
@@ -389,6 +397,8 @@
     "@alcalzone/ansi-tokenize": ["@alcalzone/ansi-tokenize@0.2.5", "", { "dependencies": { "ansi-styles": "^6.2.1", "is-fullwidth-code-point": "^5.0.0" } }, "sha512-3NX/MpTdroi0aKz134A6RC2Gb2iXVECN4QaAXnvCIxxIm3C3AVB1mkUe8NaaiyvOpDfsrqWhYtj+Q6a62RrTsw=="],
 
     "@alchemy.run/better-auth": ["@alchemy.run/better-auth@workspace:packages/better-auth"],
+
+    "@alchemy.run/cloudflare-state-store": ["@alchemy.run/cloudflare-state-store@workspace:services/cloudflare-state-store"],
 
     "@alloc/quick-lru": ["@alloc/quick-lru@5.2.0", "", {}, "sha512-UrcABB+4bUrFABwbluTIBErXwvbsU/V7TZWfmbgJfbkwiBuziS9gxdODUyuiecfdGQ85jglMW6juS3+z5TsKLw=="],
 
