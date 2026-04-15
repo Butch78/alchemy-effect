@@ -79,6 +79,13 @@ export function resolveFromEnv(): CloudflareResolvedCredentials | undefined {
   return undefined;
 }
 
+/**
+ * Prompt for Cloudflare Account ID.
+ * Returns:
+ *   - `undefined` — user cancelled (Ctrl+C / escape)
+ *   - `""`        — user skipped (Enter with no value); proceed without one
+ *   - a string   — account id to use
+ */
 const promptAccountId = (): Effect.Effect<string | undefined> =>
   Effect.gen(function* () {
     const envAccountId = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -90,7 +97,7 @@ const promptAccountId = (): Effect.Effect<string | undefined> =>
       }),
     );
     if (p.isCancel(result)) return undefined;
-    return result || undefined;
+    return result;
   });
 
 const promptOAuthScopes = (): Effect.Effect<string[] | undefined> =>

@@ -84,6 +84,13 @@ const resolveFromStored = (
     };
   });
 
+/**
+ * Prompt for AWS profile name (used for region/account lookup).
+ * Returns:
+ *   - `undefined` — user cancelled (Ctrl+C / escape)
+ *   - `""`        — user skipped (Enter with no value); proceed without one
+ *   - a string   — profile name to use
+ */
 const promptAwsProfile = (): Effect.Effect<string | undefined> =>
   Effect.gen(function* () {
     const envProfile = process.env.AWS_PROFILE;
@@ -96,7 +103,7 @@ const promptAwsProfile = (): Effect.Effect<string | undefined> =>
       }),
     );
     if (p.isCancel(result)) return undefined;
-    return result || undefined;
+    return result;
   });
 
 const runSsoCommand = (
