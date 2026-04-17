@@ -1,7 +1,9 @@
 import * as DistilledAuth from "@distilled.cloud/aws/Auth";
 import * as Console from "effect/Console";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Match from "effect/Match";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
@@ -12,20 +14,60 @@ import {
 } from "effect/unstable/process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeOs from "node:os";
-import { AuthError, type AuthProvider } from "../Auth/AuthProvider.ts";
+import { AuthError, type AuthProvider } from "../Profile/AuthProvider.ts";
 import {
   deleteCredentials,
   displayRedacted,
   readCredentials,
   writeCredentials,
-} from "../Auth/Credentials.ts";
+} from "../Profile/Credentials.ts";
 import {
   getEnv,
   getEnvRedacted,
   getEnvRedactedRequired,
   retryOnce,
-} from "../Auth/Env.ts";
+} from "../Profile/Env.ts";
 import * as Clank from "../Util/Clank.ts";
+
+export class AwsAuth extends Context.Service<AwsAuthConfig, AwsAuthProvider>()(
+  "AWS::AuthProvider",
+) {}
+
+export interface AwsAuthProvider extends AuthProvider<
+  AwsAuthConfig,
+  AwsResolvedCredentials
+> {}
+
+export const AwsAuthLive = Layer.effect(
+  AwsAuth,
+  Effect.gen(function* () {
+    const context = yield* Effect.context<
+      | FileSystem.FileSystem
+      | Path.Path
+      | HttpClient.HttpClient
+      | ChildProcessSpawner.ChildProcessSpawner
+    >();
+
+    return {
+      kind: "AuthProvider",
+      name: "AWS",
+      configure: (profileName: string) =>
+        configureCredentials(profileName).pipe(Effect.provide(context)),
+
+      logout: (profileName, config) =>
+        logout(profileName, config).pipe(Effect.provide(context)),
+
+      login: (profileName, config) =>
+        login(profileName, config).pipe(Effect.provide(context)),
+
+      prettyPrint: (profileName, config) =>
+        prettyPrint(profileName, config).pipe(Effect.provide(context)),
+
+      read: (profileName, config) =>
+        resolveCredentials(profileName, config).pipe(Effect.provide(context)),
+    } satisfies AwsAuthProvider;
+  }),
+);
 
 export type AwsAuthConfig =
   | { method: "sso"; ssoProfile: string }
@@ -66,35 +108,11 @@ export interface AwsResolvedCredentials {
   secretAccessKey: Redacted.Redacted<string>;
   sessionToken?: Redacted.Redacted<string>;
   region?: string;
-  source: { type: AwsAuthConfig["method"]; details?: string };
+  source: {
+    type: AwsAuthConfig["method"];
+    details?: string;
+  };
 }
-
-export const AwsAuth = Effect.gen(function* () {
-  const context = yield* Effect.context<
-    | FileSystem.FileSystem
-    | Path.Path
-    | HttpClient.HttpClient
-    | ChildProcessSpawner.ChildProcessSpawner
-  >();
-
-  return {
-    name: "AWS",
-    configure: (profileName: string) =>
-      configureCredentials(profileName).pipe(Effect.provide(context)),
-
-    logout: (profileName, config) =>
-      logout(profileName, config).pipe(Effect.provide(context)),
-
-    login: (profileName, config) =>
-      login(profileName, config).pipe(Effect.provide(context)),
-
-    prettyPrint: (profileName, config) =>
-      prettyPrint(profileName, config).pipe(Effect.provide(context)),
-
-    read: (profileName, config) =>
-      resolveCredentials(profileName, config).pipe(Effect.provide(context)),
-  } satisfies AuthProvider<AwsAuthConfig, AwsResolvedCredentials>;
-});
 
 const runSsoCommand = (command: "login" | "logout", ssoProfile: string) =>
   Effect.gen(function* () {

@@ -1,5 +1,4 @@
 import * as Auth from "@distilled.cloud/aws/Auth";
-import { NodeRuntime, NodeServices } from "@effect/platform-node";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Console from "effect/Console";
@@ -28,12 +27,15 @@ import * as AWSRegion from "../src/AWS/Region.ts";
 import * as CLI from "../src/Cli/index.ts";
 import { dotAlchemy } from "../src/Config.ts";
 import * as Plan from "../src/Plan.ts";
+import type { AuthProvider } from "../src/Profile/AuthProvider.ts";
+import { getProfile, setProfile } from "../src/Profile/Profile.ts";
 import { findProviderByType, type LogLine } from "../src/Provider.ts";
 import * as Stack from "../src/Stack.ts";
 import { Stage } from "../src/Stage.ts";
 import * as State from "../src/State/index.ts";
 import { loadConfigProvider } from "../src/Util/ConfigProvider.ts";
 import { fileLogger } from "../src/Util/FileLogger.ts";
+import { PlatformServices, runMain } from "../src/Util/PlatformServices.ts";
 
 const USER = Config.string("USER").pipe(
   Config.orElse(() => Config.string("USERNAME")),
@@ -187,7 +189,7 @@ const execStack = Effect.fn(function* ({
   const configProvider = yield* loadConfigProvider(envFile);
 
   // TODO(sam): implement local and watch
-  const platform = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
+  const platform = Layer.mergeAll(PlatformServices, FetchHttpClient.layer);
 
   const rootLogger = Logger.layer([fileLogger("out")]);
 
@@ -293,7 +295,7 @@ const tailCommand = Command.make(
 
     const configProvider = yield* loadConfigProvider(envFile);
 
-    const platform = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
+    const platform = Layer.mergeAll(PlatformServices, FetchHttpClient.layer);
 
     const rootLogger = Logger.layer([fileLogger("out")]);
 
@@ -428,7 +430,7 @@ const bootstrapCommand = Command.make(
   },
   Effect.fnUntraced(function* ({ envFile, profile, region, destroy }) {
     const platform = Layer.mergeAll(
-      NodeServices.layer,
+      PlatformServices,
       FetchHttpClient.layer,
       Layer.provideMerge(
         Logger.layer([fileLogger("bootstrap.txt")]),
@@ -503,6 +505,115 @@ const devCommand = Command.make(
       proc.stderr;
       proc.all;
     }),
+);
+
+const loginProfile = Flag.string("profile").pipe(
+  Flag.withDescription("Profile name to log in (defaults to 'default')"),
+  Flag.optional,
+  Flag.map(Option.getOrElse(() => "default")),
+);
+
+const loginConfigure = Flag.boolean("configure").pipe(
+  Flag.withDescription(
+    "Run the provider's interactive configure step before logging in",
+  ),
+  Flag.withDefault(false),
+);
+
+const loginCommand = Command.make(
+  "login",
+  {
+    main,
+    envFile,
+    stage,
+    profile: loginProfile,
+    configure: loginConfigure,
+  },
+  Effect.fnUntraced(function* ({
+    main,
+    stage,
+    envFile,
+    profile,
+    configure,
+  }: {
+    main: string;
+    stage: string;
+    envFile: Option.Option<string>;
+    profile: string;
+    configure: boolean;
+  }) {
+    const path = yield* Path;
+    const module = yield* Effect.promise(
+      () => import(path.resolve(process.cwd(), main)),
+    );
+    const stackEffect = module.default as ReturnType<
+      ReturnType<typeof Stack.make>
+    >;
+    if (!stackEffect) {
+      return yield* Effect.die(
+        new Error(
+          `Main file '${main}' must export a default stack definition (export default defineStack({...}))`,
+        ),
+      );
+    }
+
+    const configProvider = yield* loadConfigProvider(envFile);
+
+    const platform = Layer.mergeAll(PlatformServices, FetchHttpClient.layer);
+
+    const rootLogger = Logger.layer([fileLogger("out")]);
+
+    const alchemy = Layer.mergeAll(
+      State.LocalState,
+      Layer.provideMerge(rootLogger, dotAlchemy),
+    );
+
+    yield* Effect.gen(function* () {
+      const stack = yield* stackEffect;
+
+      const providers = [...stack.services.mapUnsafe.values()].filter(
+        (s): s is AuthProvider => s?.kind === "AuthProvider",
+      );
+
+      if (providers.length === 0) {
+        yield* Console.log("No AuthProviders found in stack services.");
+        return;
+      }
+
+      yield* Effect.forEach(
+        providers,
+        (provider) =>
+          Effect.gen(function* () {
+            const existing = yield* getProfile(profile);
+            const stored = existing?.[provider.name];
+
+            let cfg: { method: string };
+            if (configure || stored == null) {
+              cfg = yield* provider.configure(profile);
+              yield* setProfile(profile, {
+                ...(existing ?? {}),
+                [provider.name]: cfg,
+              });
+            } else {
+              cfg = stored;
+            }
+
+            yield* provider.login(profile, cfg);
+            yield* provider.prettyPrint(profile, cfg);
+          }).pipe(Effect.provide(stack.services)),
+        { discard: true },
+      );
+    }).pipe(
+      Effect.provide(
+        Layer.provideMerge(
+          alchemy,
+          Layer.mergeAll(platform, Layer.succeed(Stage, stage)),
+        ),
+      ),
+      Effect.provideService(ConfigProvider.ConfigProvider, configProvider),
+      Effect.scoped,
+    ) as Effect.Effect<void, any, never>;
+  }),
 );
 
 const TAIL_COLORS = [
@@ -589,7 +700,7 @@ const logsCommand = Command.make(
 
     const configProvider = yield* loadConfigProvider(envFile);
 
-    const platform = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
+    const platform = Layer.mergeAll(PlatformServices, FetchHttpClient.layer);
 
     const rootLogger = Logger.layer([fileLogger("out")]);
 
@@ -734,6 +845,7 @@ const root = Command.make("alchemy", {}).pipe(
     planCommand,
     tailCommand,
     logsCommand,
+    loginCommand,
   ]),
 );
 
@@ -750,7 +862,7 @@ cli.pipe(
     ConfigProvider.ConfigProvider,
     ConfigProvider.fromEnv(),
   ),
-  Effect.provide(NodeServices.layer),
+  Effect.provide(PlatformServices),
   Effect.scoped,
-  NodeRuntime.runMain,
+  runMain,
 );

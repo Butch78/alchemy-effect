@@ -1,4 +1,3 @@
-import * as Auth from "@distilled.cloud/cloudflare/Auth";
 import * as Layer from "effect/Layer";
 import * as Socket from "effect/unstable/socket/Socket";
 import { Command } from "../Build/Command.ts";
@@ -6,6 +5,7 @@ import * as Build from "../Build/index.ts";
 import * as Provider from "../Provider.ts";
 import { Random, RandomProvider } from "../Random.ts";
 import * as Account from "./Account.ts";
+import * as Credentials from "./Credentials.ts";
 import * as Containers from "./Container/index.ts";
 import * as D1 from "./D1/index.ts";
 import * as KV from "./KV/index.ts";
@@ -64,7 +64,7 @@ export const providers = () =>
     Layer.provideMerge(
       Layer.mergeAll(
         Account.fromStageConfig(),
-        Auth.fromEnv(),
+        Credentials.fromAuthProvider(),
         Socket.layerWebSocketConstructorGlobal,
       ),
     ),

@@ -9,7 +9,11 @@ export class AuthError extends Schema.TaggedErrorClass<AuthError>()(
   },
 ) {}
 
-export interface AuthProvider<Config extends { method: string }, Credentials> {
+export interface AuthProvider<
+  Config extends { method: string } = any,
+  Credentials = any,
+> {
+  kind: "AuthProvider";
   readonly name: string;
 
   configure(profileName: string): Effect.Effect<Config, AuthError>;

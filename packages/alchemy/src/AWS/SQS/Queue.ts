@@ -6,9 +6,9 @@ import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource, type ResourceBinding } from "../../Resource.ts";
-import type { Providers } from "../Providers.ts";
 import { Account, type AccountID } from "../Account.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
+import type { Providers } from "../Providers.ts";
 import type { RegionID } from "../Region.ts";
 
 export type QueueName = string;

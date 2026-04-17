@@ -11,14 +11,14 @@ import * as Redacted from "effect/Redacted";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { AuthError, type AuthProvider } from "../../Auth/AuthProvider.ts";
+import { AuthError, type AuthProvider } from "../../Profile/AuthProvider.ts";
 import {
   deleteCredentials,
   displayRedacted,
   readCredentials,
   writeCredentials,
-} from "../../Auth/Credentials.ts";
-import { getEnv, getEnvRedacted, retryOnce } from "../../Auth/Env.ts";
+} from "../../Profile/Credentials.ts";
+import { getEnv, getEnvRedacted, retryOnce } from "../../Profile/Env.ts";
 import * as Clank from "../../Util/Clank.ts";
 import * as OAuthClient from "./OAuthClient.ts";
 
@@ -79,6 +79,7 @@ export const CloudflareAuth = Effect.gen(function* () {
   >();
 
   return {
+    kind: "AuthProvider",
     name: "Cloudflare",
 
     configure: (profileName) =>

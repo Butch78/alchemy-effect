@@ -1171,13 +1171,15 @@ export const WorkerProvider = () =>
         Effect.gen(function* () {
           const main = yield* fs.realPath(props.main);
           const cwd = yield* findCwdForBundle(main);
+          const { compatibilityDate, compatibilityFlags } =
+            getCompatibility(props);
           const buildBundle = (plugins?: rolldown.RolldownPluginOption) =>
             Bundle.build(
               {
                 input: main,
                 cwd,
                 plugins: [
-                  cloudflareRolldown(getCompatibility(props)),
+                  cloudflareRolldown({ compatibilityDate, compatibilityFlags }),
                   plugins,
                   ...(props.build?.metafile ? [Sonda({ open: false })] : []),
                 ],
@@ -1335,6 +1337,8 @@ ${[
         const vite = yield* Effect.promise(() => import("vite"));
         let assetsDirectory: string | undefined;
         let serverBundle: vite.Rolldown.OutputBundle | undefined;
+        const { compatibilityDate, compatibilityFlags } =
+          getCompatibility(props);
 
         yield* Effect.promise(async () => {
           const builder = await vite.createBuilder(
@@ -1356,7 +1360,10 @@ ${[
                 sharedConfigBuild: true,
               },
               plugins: [
-                cloudflareVite(getCompatibility(props)),
+                cloudflareVite({
+                  compatibilityDate,
+                  compatibilityFlags,
+                }),
                 {
                   name: "output:ssr",
                   applyToEnvironment(environment) {

@@ -18,10 +18,6 @@ export default class Api extends Cloudflare.Worker<Api>()(
     observability: {
       enabled: true,
     },
-    compatibility: {
-      flags: ["nodejs_compat"],
-      date: "2026-03-17",
-    },
     assets: "./assets",
     build: {
       // metafile: true,
