@@ -7,7 +7,7 @@ import JobFunction from "./src/JobFunction.ts";
 
 // Loads account, region, and credentials from the SSO profile named by
 // $AWS_PROFILE (defaults to "default"). To pin a different profile per
-// stage, swap in your own `AWS.Environment.of({...})` layer here.
+// stage, swap in your own `AWS.makeEnvironment({...})` layer here.
 const aws = AWS.providers().pipe(Layer.provide(AWS.Default));
 const dashboardRegion = process.env.AWS_REGION ?? "us-west-2";
 

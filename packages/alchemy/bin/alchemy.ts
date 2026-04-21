@@ -529,7 +529,7 @@ const bootstrapCommand = Command.make(
 
       // Build a single AWSEnvironment, then derive Region/Credentials from
       // it so resource providers downstream see a consistent view.
-      const environment = AWSEnvironment.of({
+      const environment = AWSEnvironment.makeEnvironment({
         accountId: ssoProfile.sso_account_id,
         region: region ?? ssoProfile.region ?? "us-east-1",
         credentials: Auth.loadProfileCredentials(profile),

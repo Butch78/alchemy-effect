@@ -112,7 +112,7 @@ const awsEnvironment = Layer.unwrap(
     ).pipe(Config.withDefault("http://localhost.localstack.cloud:4566"));
 
     if (LOCAL) {
-      return AWSEnvironment.of({
+      return AWSEnvironment.makeEnvironment({
         accountId: "000000000000",
         region: "us-east-1",
         credentials: {

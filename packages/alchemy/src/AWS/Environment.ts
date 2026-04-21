@@ -100,10 +100,16 @@ const isStatic = (
   typeof (shape.credentials as AwsCredentialIdentity).accessKeyId === "string";
 
 /**
- * Build an `AWSEnvironment` directly from values — useful for static
- * credentials in CI or tests.
+ * Build an `AWSEnvironment` Layer directly from values — useful for
+ * static credentials in CI or tests.
+ *
+ * Named `makeEnvironment` rather than `of` because `Context.Service.of`
+ * already exists with different semantics (builds the service value, not
+ * a Layer); putting both on `AWSEnvironment` would be confusing.
  */
-export const of = (shape: AWSEnvironmentShape | AWSEnvironmentStaticInput) =>
+export const makeEnvironment = (
+  shape: AWSEnvironmentShape | AWSEnvironmentStaticInput,
+) =>
   Layer.succeed(
     AWSEnvironment,
     isStatic(shape)
