@@ -1,4 +1,5 @@
 import * as Auth from "@distilled.cloud/aws/Auth";
+import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Console from "effect/Console";
@@ -17,8 +18,9 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import packageJson from "../package.json" with { type: "json" };
 import { apply } from "../src/Apply.ts";
 import { provideFreshArtifactStore } from "../src/Artifacts.ts";
-import { AuthProviders } from "../src/Auth/AuthProvider.ts";
+import { AuthError, AuthProviders } from "../src/Auth/AuthProvider.ts";
 import { getProfile, setProfile } from "../src/Auth/Profile.ts";
+import { PromptCancelled } from "../src/Util/Clank.ts";
 import {
   bootstrap as bootstrapAws,
   destroyBootstrap as destroyBootstrapAws,
@@ -49,28 +51,50 @@ const STAGE = Config.string("stage").pipe(
 );
 
 /**
+ * `true` if `e` is a {@link PromptCancelled}, or an {@link AuthError} whose
+ * `cause` chain bottoms out in one. Schema-tagged errors don't always
+ * survive `instanceof` across module boundaries, so we also accept any
+ * object whose `_tag` matches.
+ */
+const isPromptCancellation = (e: unknown): boolean => {
+  for (let cur: unknown = e, i = 0; cur != null && i < 16; i++) {
+    if (cur instanceof PromptCancelled) return true;
+    if (
+      typeof cur === "object" &&
+      (cur as { _tag?: unknown })._tag === "PromptCancelled"
+    ) {
+      return true;
+    }
+    if (
+      cur instanceof AuthError ||
+      (typeof cur === "object" &&
+        (cur as { _tag?: unknown })._tag === "AuthError")
+    ) {
+      cur = (cur as { cause?: unknown }).cause;
+      continue;
+    }
+    return false;
+  }
+  return false;
+};
+
+/**
  * Catches user cancellations (Ctrl+C inside a prompt, surfaced as
- * `PromptCancelled` or as an `AuthError` wrapping one) and exits the CLI
- * cleanly with a friendly message instead of dumping a stack trace.
+ * {@link PromptCancelled} or wrapped in an {@link AuthError}) and exits
+ * the CLI cleanly with a friendly message instead of dumping a stack
+ * trace.
  */
 const handleCancellation = <A, E, R>(self: Effect.Effect<A, E, R>) =>
   self.pipe(
     Effect.catchCause((cause) => {
-      // Effect 4's Cause shape varies (Fail/Die/Sequential/Parallel/...).
-      // Cheaply scan the serialized form for our cancellation marker rather
-      // than walking every variant by hand.
-      let json: string;
-      try {
-        json = JSON.stringify(cause, (_, v) =>
-          typeof v === "bigint" ? v.toString() : v,
-        );
-      } catch {
-        json = String(cause);
-      }
-      if (json.includes("PromptCancelled")) {
-        return Console.log("\nCancelled.");
-      }
-      return Effect.failCause(cause) as Effect.Effect<never, E, never>;
+      const cancelled = cause.reasons.some((r) => {
+        if (Cause.isFailReason(r)) return isPromptCancellation(r.error);
+        if (Cause.isDieReason(r)) return isPromptCancellation(r.defect);
+        return false;
+      });
+      return cancelled
+        ? Console.log("\nCancelled.")
+        : (Effect.failCause(cause) as Effect.Effect<never, E, never>);
     }),
     // A bare fiber interrupt (Ctrl+C while not inside a prompt) shouldn't
     // dump a stack trace either.
