@@ -700,6 +700,10 @@ body.alc-root,
   font-family: var(--alc-font-mono);
   font-size: 11.5px;
   line-height: 1.7;
+  /* Bright parchment for any character that isn't tokenized by
+     highlightTS (punctuation: <, =, (, ), {, }, ;, etc.) so symbols
+     don't disappear into the walnut bg. */
+  color: var(--alc-code-var);
   overflow: auto;
   flex: 1;
   min-height: 0;
@@ -737,9 +741,9 @@ body.alc-root,
   grid-template-columns: 14px minmax(0, 1fr);
   align-items: baseline;
   gap: 6px;
-}
-.eff-diff__line--common {
-  color: var(--alc-code-var);
+  padding: 0 6px;
+  margin: 0 -6px;
+  border-radius: 3px;
 }
 .eff-diff__marker {
   display: inline-block;
@@ -755,8 +759,14 @@ body.alc-root,
   min-width: 0;
 }
 
-/* The "+" marker only appears on diff lines (the active variant); common
-   lines have an empty marker so the gutter alignment matches. */
+/* Diff lines get a subtle green tint background so the whole line
+   reads as "added" — not just the "+" prefix. The tint is soft enough
+   not to fight the syntax-highlighted tokens. */
+.eff-diff__line--ddb,
+.eff-diff__line--d1 {
+  background-color: rgba(143, 177, 94, 0.12);
+  box-shadow: inset 2px 0 0 var(--alc-accent-bright);
+}
 .eff-diff__line--ddb .eff-diff__marker::before,
 .eff-diff__line--d1 .eff-diff__marker::before {
   content: "+";
