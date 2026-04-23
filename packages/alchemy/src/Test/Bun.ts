@@ -37,8 +37,7 @@ type TestEffect<A, Req = never> = Effect.Effect<
 
 const platform = Layer.mergeAll(BunServices.layer, FetchHttpClient.layer);
 
-// CLI/reporting + dotAlchemy (state store is composed separately so
-// callers can override it per-test via `deploy`/`destroy` options).
+// override alchemy state store, CLI/reporting, state, and dotAlchemy
 const alchemy = Layer.mergeAll(
   // CLI.inkCLI(),
   // optional
@@ -196,7 +195,6 @@ const exec = <A, B>(
   effect: TestEffect<CompiledStack<A>, Stage | DotAlchemy>,
   fn: (stack: CompiledStack<A>) => Effect.Effect<B, any, any>,
   options?: {
-    /** @default test */
     stage?: string;
   },
 ) =>
@@ -210,10 +208,6 @@ const exec = <A, B>(
       Effect.provide(Layer.succeed(ConfigProvider, configProvider)),
     );
   }).pipe(
-    // `State` is intentionally NOT provided here — its requirement
-    // propagates up so a caller can override it with
-    // `deploy(Stack).pipe(Effect.provide(MyState))`. The outer `run`
-    // applies `State.LocalState` as a fallback.
     Effect.provideService(AuthProviders, {}),
     Effect.provide(Layer.succeed(Stage, options?.stage ?? "test")),
     Effect.provide(TestCli),
