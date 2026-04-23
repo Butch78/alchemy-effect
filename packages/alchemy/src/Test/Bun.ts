@@ -173,7 +173,10 @@ export function afterEach(eff: TestEffect<void>, options?: HookOptions) {
 
 export const deploy = <A>(
   effect: TestEffect<CompiledStack<A>, Stage | DotAlchemy>,
-  options?: { stage?: string },
+  options?: {
+    /** @default test */
+    stage?: string;
+  },
 ) =>
   exec(
     effect,
@@ -188,7 +191,10 @@ export const deploy = <A>(
 
 export const destroy = (
   effect: TestEffect<CompiledStack, Stage | DotAlchemy>,
-  options?: { stage?: string },
+  options?: {
+    /** @default test */
+    stage?: string;
+  },
 ) =>
   exec(
     effect,
@@ -210,7 +216,10 @@ export const destroy = (
 const exec = <A, B>(
   effect: TestEffect<CompiledStack<A>, Stage | DotAlchemy>,
   fn: (stack: CompiledStack<A>) => Effect.Effect<B, any, any>,
-  options?: { stage?: string },
+  options?: {
+    /** @default test */
+    stage?: string;
+  },
 ) =>
   Effect.gen(function* () {
     const stack = yield* effect;
