@@ -6,7 +6,7 @@ import * as Layer from "effect/Layer";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { STATE_STORE_SCRIPT_NAME } from "./Constants.ts";
+import { STATE_STORE_SCRIPT_NAME } from "alchemy/State";
 import StateStore from "./StateStore.ts";
 import { AuthToken } from "./Token.ts";
 

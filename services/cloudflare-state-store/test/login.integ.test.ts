@@ -1,6 +1,10 @@
 import * as CfCredentials from "@distilled.cloud/cloudflare/Credentials";
 import { CloudflareEnvironment } from "alchemy/Cloudflare";
-import { HttpStateStore, HttpStateStoreAuth } from "alchemy/State";
+import {
+  HttpStateStore,
+  HttpStateStoreAuth,
+  loginWithCloudflare,
+} from "alchemy/State";
 import {
   afterAll,
   beforeAll,
@@ -13,7 +17,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import StateStoreStack from "../alchemy.run.ts";
-import { loginWithCloudflare } from "../src/Login.ts";
 import TestStack from "./TestStack/Stack.ts";
 
 /**

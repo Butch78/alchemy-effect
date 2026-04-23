@@ -1,7 +1,7 @@
 import { Random } from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
+import { STATE_STORE_AUTH_TOKEN_SECRET_NAME } from "alchemy/State";
 import * as Effect from "effect/Effect";
-import { STATE_STORE_AUTH_TOKEN_SECRET_NAME } from "./Constants.ts";
 
 /**
  * The account-wide Secrets Store that backs every secret used by the
