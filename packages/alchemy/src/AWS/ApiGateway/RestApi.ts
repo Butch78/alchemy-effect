@@ -2,18 +2,21 @@ import { Region } from "@distilled.cloud/aws/Region";
 import * as ag from "@distilled.cloud/aws/api-gateway";
 import * as Effect from "effect/Effect";
 import { deepEqual, isResolved } from "../../Diff.ts";
+import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags } from "../../Tags.ts";
+import { createInternalTags, tagRecord } from "../../Tags.ts";
 
 import { restApiArn, syncTags } from "./common.ts";
 
 export interface RestApiProps {
   /**
    * Name of the REST API.
+   *
+   * If omitted, Alchemy generates a deterministic physical name.
    */
-  name: string;
+  name?: string;
   description?: string;
   version?: string;
   cloneFrom?: string;
@@ -56,25 +59,68 @@ export interface RestApi extends Resource<
 /**
  * An Amazon API Gateway REST API (v1).
  *
+ * This is the low-level REST API primitive. Compose it with
+ * `GatewayResource`, `Method`, `Deployment`, and `Stage` when you need
+ * precise control over REST API configuration. Higher-level OpenAPI or
+ * Effect HttpApi schema generation can be layered on top separately.
+ *
  * @section Creating an API
- * @example Regional REST API
+ * @example Regional REST API with Generated Name
  * ```typescript
  * import * as ApiGateway from "alchemy/AWS/ApiGateway";
  *
  * const api = yield* ApiGateway.RestApi("PublicApi", {
- *   name: "my-api",
  *   endpointConfiguration: { types: ["REGIONAL"] },
+ *   tags: { service: "orders" },
+ * });
+ * ```
+ *
+ * @example Private REST API
+ * ```typescript
+ * const api = yield* ApiGateway.RestApi("PrivateApi", {
+ *   endpointConfiguration: {
+ *     types: ["PRIVATE"],
+ *     vpcEndpointIds: [endpoint.vpcEndpointId],
+ *   },
+ *   policy: JSON.stringify({
+ *     Version: "2012-10-17",
+ *     Statement: [{
+ *       Effect: "Allow",
+ *       Principal: "*",
+ *       Action: "execute-api:Invoke",
+ *       Resource: "*",
+ *     }],
+ *   }),
+ * });
+ * ```
+ *
+ * @section Binary payloads
+ * @example Enable Binary Media Types
+ * ```typescript
+ * const api = yield* ApiGateway.RestApi("BinaryApi", {
+ *   binaryMediaTypes: ["application/octet-stream", "image/png"],
+ *   minimumCompressionSize: 1024,
+ * });
+ * ```
+ *
+ * @section Endpoint hardening
+ * @example Disable Default Execute API Endpoint
+ * ```typescript
+ * const api = yield* ApiGateway.RestApi("CustomDomainOnlyApi", {
+ *   endpointConfiguration: { types: ["REGIONAL"] },
+ *   disableExecuteApiEndpoint: true,
  * });
  * ```
  */
 export const RestApi = Resource<RestApi>("AWS.ApiGateway.RestApi");
 
-const toAttrTags = (tags: ag.RestApi["tags"]) =>
-  Object.fromEntries(
-    Object.entries(tags ?? {}).filter(
-      (e): e is [string, string] => e[1] !== undefined,
-    ),
-  );
+const generatedName = (id: string, props: RestApiProps) =>
+  props.name
+    ? Effect.succeed(props.name)
+    : createPhysicalName({
+        id,
+        maxLength: 128,
+      });
 
 const snapshotFromApi = (api: ag.RestApi) => ({
   restApiId: api.id!,
@@ -90,7 +136,7 @@ const snapshotFromApi = (api: ag.RestApi) => ({
   disableExecuteApiEndpoint: api.disableExecuteApiEndpoint,
   securityPolicy: api.securityPolicy,
   endpointAccessMode: api.endpointAccessMode,
-  tags: toAttrTags(api.tags),
+  tags: tagRecord(api.tags),
 });
 
 const patchReplace = (path: string, value: string): ag.PatchOperation => ({
@@ -134,7 +180,9 @@ const buildUpdatePatches = (
   prev: RestApi["Attributes"],
 ): ag.PatchOperation[] => {
   const patches: ag.PatchOperation[] = [];
-  if (news.name !== prev.name) patches.push(patchReplace("/name", news.name));
+  if (news.name !== undefined && news.name !== prev.name) {
+    patches.push(patchReplace("/name", news.name));
+  }
   if (news.description !== prev.description) {
     patches.push(patchReplace("/description", news.description ?? ""));
   }
@@ -194,6 +242,9 @@ export const RestApiProvider = () =>
           if (!isResolved(newsIn)) return;
           const news = newsIn as RestApiProps;
           if (
+            // Endpoint type, private endpoint IDs, and IP address type are part
+            // of the REST API endpoint shape; replacing avoids partial endpoint
+            // drift that API Gateway cannot consistently patch in place.
             !deepEqual(
               news.endpointConfiguration?.types,
               olds.endpointConfiguration?.types,
@@ -227,12 +278,13 @@ export const RestApiProvider = () =>
             return yield* Effect.die("RestApi props were not resolved");
           }
           const news = newsIn as RestApiProps;
+          const name = yield* generatedName(id, news);
           const internalTags = yield* createInternalTags(id);
           const userTags = news.tags ?? {};
           const allTags = { ...userTags, ...internalTags };
 
           const created = yield* ag.createRestApi({
-            name: news.name,
+            name,
             description: news.description,
             version: news.version,
             cloneFrom: news.cloneFrom,

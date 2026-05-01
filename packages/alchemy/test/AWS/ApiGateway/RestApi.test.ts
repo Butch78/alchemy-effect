@@ -11,7 +11,6 @@ test.provider("create and delete REST API", (stack) =>
     const api = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.RestApi("AgRestApiLifecycle", {
-          name: "alchemy-test-ag-restapi-lifecycle",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
       }),
@@ -32,7 +31,6 @@ test.provider("binary media types update applies via patch", (stack) =>
     const api = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.RestApi("AgRestApiBinary", {
-          name: "alchemy-test-ag-restapi-binary",
           endpointConfiguration: { types: ["REGIONAL"] },
           binaryMediaTypes: ["application/octet-stream"],
         });
@@ -46,7 +44,6 @@ test.provider("binary media types update applies via patch", (stack) =>
     yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.RestApi("AgRestApiBinary", {
-          name: "alchemy-test-ag-restapi-binary",
           endpointConfiguration: { types: ["REGIONAL"] },
           binaryMediaTypes: ["application/octet-stream", "image/png"],
         });
@@ -55,6 +52,36 @@ test.provider("binary media types update applies via patch", (stack) =>
 
     const remote = yield* ag.getRestApi({ restApiId: api.restApiId });
     expect(remote.binaryMediaTypes?.includes("image/png")).toBe(true);
+
+    yield* stack.destroy();
+  }),
+);
+
+test.provider("binary media types removal applies via patch", (stack) =>
+  Effect.gen(function* () {
+    const api = yield* stack.deploy(
+      Effect.gen(function* () {
+        return yield* AWS.ApiGateway.RestApi("AgRestApiBinaryRemoval", {
+          endpointConfiguration: { types: ["REGIONAL"] },
+          binaryMediaTypes: ["application/octet-stream", "image/png"],
+        });
+      }),
+    );
+
+    yield* stack.deploy(
+      Effect.gen(function* () {
+        return yield* AWS.ApiGateway.RestApi("AgRestApiBinaryRemoval", {
+          endpointConfiguration: { types: ["REGIONAL"] },
+          binaryMediaTypes: ["image/png"],
+        });
+      }),
+    );
+
+    const remote = yield* ag.getRestApi({ restApiId: api.restApiId });
+    expect(remote.binaryMediaTypes?.includes("image/png")).toBe(true);
+    expect(remote.binaryMediaTypes?.includes("application/octet-stream")).toBe(
+      false,
+    );
 
     yield* stack.destroy();
   }),

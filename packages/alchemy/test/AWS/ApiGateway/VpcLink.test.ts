@@ -20,7 +20,6 @@ test.provider.skipIf(!targetArn)(
       const link = yield* stack.deploy(
         Effect.gen(function* () {
           return yield* AWS.ApiGateway.VpcLink("AgVpcLinkTest", {
-            name: "alchemy-test-vpclink",
             description: "v1",
             targetArns: [arn],
           });
@@ -32,7 +31,6 @@ test.provider.skipIf(!targetArn)(
       yield* stack.deploy(
         Effect.gen(function* () {
           return yield* AWS.ApiGateway.VpcLink("AgVpcLinkTest", {
-            name: "alchemy-test-vpclink",
             description: "v2",
             targetArns: [arn],
           });

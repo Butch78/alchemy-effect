@@ -3,18 +3,21 @@ import * as ag from "@distilled.cloud/aws/api-gateway";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import { deepEqual, isResolved } from "../../Diff.ts";
+import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags } from "../../Tags.ts";
+import { createInternalTags, tagRecord } from "../../Tags.ts";
 
 import { syncTags, vpcLinkArn } from "./common.ts";
 
 export interface VpcLinkProps {
   /**
-   * Name of the VPC link (required by AWS).
+   * Name of the VPC link.
+   *
+   * If omitted, Alchemy generates a deterministic physical name.
    */
-  name: string;
+  name?: string;
   /**
    * Target ARNs for the integration (e.g. load balancer ARNs).
    */
@@ -46,7 +49,6 @@ export interface VpcLink extends Resource<
  * @example Create a VPC link
  * ```typescript
  * const link = yield* ApiGateway.VpcLink("NlbLink", {
- *   name: "nlb-link",
  *   description: "Link to internal NLB",
  *   targetArns: [nlb.loadBalancerArn],
  * });
@@ -69,12 +71,13 @@ const VpcLinkResource = Resource<VpcLink>("AWS.ApiGateway.VpcLink");
 
 export { VpcLinkResource as VpcLink };
 
-const toTags = (tags: ag.VpcLink["tags"]) =>
-  Object.fromEntries(
-    Object.entries(tags ?? {}).filter(
-      (e): e is [string, string] => e[1] !== undefined,
-    ),
-  );
+const generatedName = (id: string, props: VpcLinkProps) =>
+  props.name
+    ? Effect.succeed(props.name)
+    : createPhysicalName({
+        id,
+        maxLength: 128,
+      });
 
 const snapshotFromVpcLink = (
   v: ag.VpcLink,
@@ -114,18 +117,19 @@ export const VpcLinkProvider = () =>
               ),
             );
           if (!v?.id) return undefined;
-          return snapshotFromVpcLink(v, toTags(v.tags));
+          return snapshotFromVpcLink(v, tagRecord(v.tags));
         }),
         create: Effect.fn(function* ({ id, news: newsIn, session }) {
           if (!isResolved(newsIn)) {
             return yield* Effect.die("VpcLink props were not resolved");
           }
           const news = newsIn as VpcLinkProps;
+          const name = yield* generatedName(id, news);
           const internalTags = yield* createInternalTags(id);
           const allTags = { ...news.tags, ...internalTags };
 
           const created = yield* ag.createVpcLink({
-            name: news.name,
+            name,
             description: news.description,
             targetArns: news.targetArns,
             tags: allTags,
@@ -137,7 +141,7 @@ export const VpcLinkProvider = () =>
 
           const v = yield* ag.getVpcLink({ vpcLinkId: created.id });
           if (!v.id) return yield* Effect.die("getVpcLink missing id");
-          return snapshotFromVpcLink(v, toTags(v.tags));
+          return snapshotFromVpcLink(v, tagRecord(v.tags));
         }),
         update: Effect.fn(function* ({ id, news: newsIn, output, session }) {
           if (!isResolved(newsIn)) {
@@ -152,7 +156,7 @@ export const VpcLinkProvider = () =>
               value: news.description ?? "",
             });
           }
-          if (news.name !== output.name) {
+          if (news.name !== undefined && news.name !== output.name) {
             patches.push({
               op: "replace",
               path: "/name",
@@ -178,7 +182,7 @@ export const VpcLinkProvider = () =>
 
           yield* session.note(`Updated VPC link ${output.vpcLinkId}`);
           const v = yield* ag.getVpcLink({ vpcLinkId: output.vpcLinkId });
-          return snapshotFromVpcLink(v, toTags(v.tags));
+          return snapshotFromVpcLink(v, tagRecord(v.tags));
         }),
         delete: Effect.fn(function* ({ output, session }) {
           yield* ag.deleteVpcLink({ vpcLinkId: output.vpcLinkId }).pipe(

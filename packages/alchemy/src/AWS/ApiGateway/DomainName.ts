@@ -1,10 +1,11 @@
 import * as ag from "@distilled.cloud/aws/api-gateway";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import { deepEqual, isResolved } from "../../Diff.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags } from "../../Tags.ts";
+import { createInternalTags, tagRecord } from "../../Tags.ts";
 
 import { syncTags } from "./common.ts";
 
@@ -61,12 +62,12 @@ const DomainNameResource = Resource<DomainName>("AWS.ApiGateway.DomainName");
 
 export { DomainNameResource as DomainName };
 
-const toTags = (tags: ag.DomainName["tags"]) =>
-  Object.fromEntries(
-    Object.entries(tags ?? {}).filter(
-      (e): e is [string, string] => e[1] !== undefined,
-    ),
-  );
+const retryDomainNameMutation = Effect.retry({
+  while: (e: any) =>
+    e._tag === "ConflictException" || e._tag === "TooManyRequestsException",
+  schedule: Schedule.spaced("1 second"),
+  times: 8,
+});
 
 export const DomainNameProvider = () =>
   Provider.effect(
@@ -141,7 +142,7 @@ export const DomainNameProvider = () =>
             distributionDomainName: d.distributionDomainName,
             distributionHostedZoneId: d.distributionHostedZoneId,
             domainNameArn: d.domainNameArn,
-            tags: toTags(d.tags),
+            tags: tagRecord(d.tags),
           };
         }),
         create: Effect.fn(function* ({ id, news: newsIn, session }) {
@@ -181,7 +182,7 @@ export const DomainNameProvider = () =>
             distributionDomainName: d.distributionDomainName,
             distributionHostedZoneId: d.distributionHostedZoneId,
             domainNameArn: d.domainNameArn,
-            tags: toTags(d.tags),
+            tags: tagRecord(d.tags),
           };
         }),
         update: Effect.fn(function* ({
@@ -221,10 +222,14 @@ export const DomainNameProvider = () =>
             });
           }
           if (patches.length > 0) {
-            yield* ag.updateDomainName({
-              domainName: output.domainName,
-              patchOperations: patches,
-            });
+            // Domain name mutations can briefly conflict while API Gateway
+            // propagates certificate, policy, or routing changes.
+            yield* ag
+              .updateDomainName({
+                domainName: output.domainName,
+                patchOperations: patches,
+              })
+              .pipe(retryDomainNameMutation);
           }
 
           const internalTags = yield* createInternalTags(id);
@@ -246,13 +251,14 @@ export const DomainNameProvider = () =>
             distributionDomainName: d.distributionDomainName,
             distributionHostedZoneId: d.distributionHostedZoneId,
             domainNameArn: d.domainNameArn,
-            tags: toTags(d.tags),
+            tags: tagRecord(d.tags),
           };
         }),
         delete: Effect.fn(function* ({ output, session }) {
-          yield* ag
-            .deleteDomainName({ domainName: output.domainName })
-            .pipe(Effect.catchTag("NotFoundException", () => Effect.void));
+          yield* ag.deleteDomainName({ domainName: output.domainName }).pipe(
+            Effect.catchTag("NotFoundException", () => Effect.void),
+            retryDomainNameMutation,
+          );
           yield* session.note(`Deleted domain name ${output.domainName}`);
         }),
       };

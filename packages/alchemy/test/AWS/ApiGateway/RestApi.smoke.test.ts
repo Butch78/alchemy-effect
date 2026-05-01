@@ -22,7 +22,6 @@ test.provider(
           );
 
           const api = yield* AWS.ApiGateway.RestApi("AgSmokeApi", {
-            name: "alchemy-test-ag-smoke-rest",
             endpointConfiguration: { types: ["REGIONAL"] },
           });
 

@@ -11,7 +11,6 @@ test.provider("create and delete stage", (stack) =>
     const { stage } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgStageApi", {
-          name: "alchemy-test-ag-stage",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgStageMock", {
@@ -44,7 +43,6 @@ test.provider("stage variables update in place", (stack) =>
     const { api, deployment } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgStageVarApi", {
-          name: "alchemy-test-ag-stage-vars",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgStageVarMock", {
@@ -70,7 +68,6 @@ test.provider("stage variables update in place", (stack) =>
     yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgStageVarApi", {
-          name: "alchemy-test-ag-stage-vars",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgStageVarMock", {
@@ -108,7 +105,6 @@ test.provider("stage method settings update in place", (stack) =>
     const { api } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgStageMethodApi", {
-          name: "alchemy-test-ag-stage-method",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgStageMethodMock", {
@@ -139,7 +135,6 @@ test.provider("stage method settings update in place", (stack) =>
     yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgStageMethodApi", {
-          name: "alchemy-test-ag-stage-method",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgStageMethodMock", {

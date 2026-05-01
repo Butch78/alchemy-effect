@@ -16,6 +16,13 @@ export const normalizeTags = (tags: Tags) =>
       )
     : tags;
 
+export const tagRecord = (tags: Tags | undefined): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(normalizeTags(tags ?? {})).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+
 export const hasTags = (expectedTags: Tags, tags: Tags | undefined) => {
   const actualTags = normalizeTags(tags ?? []);
   return Object.entries(normalizeTags(expectedTags)).every(

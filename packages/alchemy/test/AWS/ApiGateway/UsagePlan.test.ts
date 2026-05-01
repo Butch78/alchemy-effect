@@ -11,7 +11,6 @@ test.provider("create and delete usage plan", (stack) =>
     const plan = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.UsagePlan("AgUsagePlan", {
-          name: "alchemy-test-ag-usageplan",
           description: "test plan",
         });
       }),
@@ -28,7 +27,6 @@ test.provider("usage plan throttle updates in place", (stack) =>
     const plan = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.UsagePlan("AgUsagePlanThrottle", {
-          name: "alchemy-test-ag-usageplan-throttle",
           throttle: { burstLimit: 10, rateLimit: 100 },
         });
       }),
@@ -37,7 +35,6 @@ test.provider("usage plan throttle updates in place", (stack) =>
     yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.UsagePlan("AgUsagePlanThrottle", {
-          name: "alchemy-test-ag-usageplan-throttle",
           throttle: { burstLimit: 20, rateLimit: 200 },
         });
       }),

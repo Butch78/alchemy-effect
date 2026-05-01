@@ -11,7 +11,6 @@ test.provider("create and delete API Gateway resource", (stack) =>
     const { api, res } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgResApi", {
-          name: "alchemy-test-ag-resource",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         const res = yield* AWS.ApiGateway.Resource("AgSubPath", {

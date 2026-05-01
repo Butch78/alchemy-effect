@@ -2,6 +2,7 @@ import * as AWS from "@/AWS";
 import * as Test from "@/Test/Vitest";
 import { expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 
 const { test } = Test.make({ providers: AWS.providers() });
 
@@ -10,7 +11,6 @@ test.provider("create and delete API key", (stack) =>
     const key = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.ApiKey("AgApiKey", {
-          name: "alchemy-test-ag-apikey",
           generateDistinctId: true,
           enabled: true,
         });
@@ -28,8 +28,7 @@ test.provider("custom API key value is not returned in outputs", (stack) =>
     const key = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* AWS.ApiGateway.ApiKey("AgApiKeySecret", {
-          name: "alchemy-test-ag-apikey-secret",
-          value: "alchemy-test-secret-value-abc123",
+          value: Redacted.make("alchemy-test-secret-value-abc123"),
         });
       }),
     );

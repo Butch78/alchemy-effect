@@ -2,19 +2,40 @@ import { Region } from "@distilled.cloud/aws/Region";
 import * as ag from "@distilled.cloud/aws/api-gateway";
 import * as Effect from "effect/Effect";
 import { deepEqual, isResolved } from "../../Diff.ts";
+import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags } from "../../Tags.ts";
+import { createInternalTags, tagRecord } from "../../Tags.ts";
 
 import { syncTags, usagePlanArn } from "./common.ts";
 
 export interface UsagePlanProps {
-  name: string;
+  /**
+   * Friendly name for the usage plan.
+   *
+   * If omitted, Alchemy generates a deterministic physical name.
+   */
+  name?: string;
+  /**
+   * Human-readable description for operators.
+   */
   description?: string;
+  /**
+   * API stages associated with this plan.
+   */
   apiStages?: ag.ApiStage[];
+  /**
+   * Default request throttle applied by the plan.
+   */
   throttle?: ag.ThrottleSettings;
+  /**
+   * Quota limit and period applied by the plan.
+   */
   quota?: ag.QuotaSettings;
+  /**
+   * User-defined tags. Alchemy internal tags are merged automatically.
+   */
   tags?: Record<string, string>;
 }
 
@@ -41,7 +62,6 @@ export interface UsagePlan extends Resource<
  * @example Usage plan with stage
  * ```typescript
  * const plan = yield* ApiGateway.UsagePlan("Standard", {
- *   name: "standard",
  *   apiStages: [{ apiId: api.restApiId, stage: stage.stageName }],
  * });
  * ```
@@ -50,12 +70,13 @@ const UsagePlanResource = Resource<UsagePlan>("AWS.ApiGateway.UsagePlan");
 
 export { UsagePlanResource as UsagePlan };
 
-const toTags = (tags: ag.UsagePlan["tags"]) =>
-  Object.fromEntries(
-    Object.entries(tags ?? {}).filter(
-      (e): e is [string, string] => e[1] !== undefined,
-    ),
-  );
+const generatedName = (id: string, props: UsagePlanProps) =>
+  props.name
+    ? Effect.succeed(props.name)
+    : createPhysicalName({
+        id,
+        maxLength: 128,
+      });
 
 const encodeJsonPointerSegment = (s: string) =>
   s.replace(/~/g, "~0").replace(/\//g, "~1");
@@ -220,7 +241,7 @@ export const UsagePlanProvider = () =>
         diff: Effect.fn(function* ({ news: newsIn, olds }) {
           if (!isResolved(newsIn)) return;
           const news = newsIn as UsagePlanProps;
-          if (news.name !== olds.name) {
+          if (news.name !== undefined && news.name !== olds.name) {
             return { action: "replace" } as const;
           }
         }),
@@ -241,7 +262,7 @@ export const UsagePlanProvider = () =>
             apiStages: p.apiStages,
             throttle: p.throttle,
             quota: p.quota,
-            tags: toTags(p.tags),
+            tags: tagRecord(p.tags),
           };
         }),
         create: Effect.fn(function* ({ id, news: newsIn, session }) {
@@ -249,11 +270,12 @@ export const UsagePlanProvider = () =>
             return yield* Effect.die("UsagePlan props were not resolved");
           }
           const news = newsIn as UsagePlanProps;
+          const name = yield* generatedName(id, news);
           const internalTags = yield* createInternalTags(id);
           const allTags = { ...news.tags, ...internalTags };
 
           const p = yield* ag.createUsagePlan({
-            name: news.name,
+            name,
             description: news.description,
             apiStages: news.apiStages,
             throttle: news.throttle,
@@ -270,7 +292,7 @@ export const UsagePlanProvider = () =>
             apiStages: full.apiStages,
             throttle: full.throttle,
             quota: full.quota,
-            tags: toTags(full.tags),
+            tags: tagRecord(full.tags),
           };
         }),
         update: Effect.fn(function* ({ id, news: newsIn, output, session }) {
@@ -317,7 +339,7 @@ export const UsagePlanProvider = () =>
             apiStages: full.apiStages,
             throttle: full.throttle,
             quota: full.quota,
-            tags: toTags(full.tags),
+            tags: tagRecord(full.tags),
           };
         }),
         delete: Effect.fn(function* ({ output, session }) {

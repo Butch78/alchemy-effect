@@ -10,7 +10,6 @@ test.provider("create and delete deployment", (stack) =>
     const { api, deployment } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgDepApi", {
-          name: "alchemy-test-ag-deployment",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgDepMock", {
@@ -39,7 +38,6 @@ test.provider("deployment trigger change creates new deployment", (stack) =>
     const { api, d1 } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgTrigApi", {
-          name: "alchemy-test-ag-dep-triggers",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgTrigMock", {
@@ -61,7 +59,6 @@ test.provider("deployment trigger change creates new deployment", (stack) =>
     const { d2 } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgTrigApi", {
-          name: "alchemy-test-ag-dep-triggers",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgTrigMock", {

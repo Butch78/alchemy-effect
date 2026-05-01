@@ -10,12 +10,9 @@ test.provider("create and delete usage plan key association", (stack) =>
     const { key, plan } = yield* stack.deploy(
       Effect.gen(function* () {
         const key = yield* AWS.ApiGateway.ApiKey("AgUpkKey", {
-          name: "alchemy-test-ag-upk-key",
           generateDistinctId: true,
         });
-        const plan = yield* AWS.ApiGateway.UsagePlan("AgUpkPlan", {
-          name: "alchemy-test-ag-upk-plan",
-        });
+        const plan = yield* AWS.ApiGateway.UsagePlan("AgUpkPlan", {});
         yield* AWS.ApiGateway.UsagePlanKey("AgUpkLink", {
           usagePlanId: plan.id,
           keyId: key.id,

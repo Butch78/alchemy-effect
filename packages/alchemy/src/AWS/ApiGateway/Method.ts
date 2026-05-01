@@ -15,6 +15,11 @@ export interface MethodIntegrationProps {
   uri?: Input<string>;
   connectionType?: ag.ConnectionType;
   connectionId?: string;
+  /**
+   * IAM role ARN used by API Gateway for integration credentials.
+   *
+   * This is not a secret value; API Gateway stores an ARN or passthrough marker.
+   */
   credentials?: string;
   requestParameters?: { [key: string]: string | undefined };
   requestTemplates?: { [key: string]: string | undefined };

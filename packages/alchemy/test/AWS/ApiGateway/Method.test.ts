@@ -11,7 +11,6 @@ test.provider("create and delete MOCK method", (stack) =>
     const { api } = yield* stack.deploy(
       Effect.gen(function* () {
         const api = yield* AWS.ApiGateway.RestApi("AgMethodApi", {
-          name: "alchemy-test-ag-method",
           endpointConfiguration: { types: ["REGIONAL"] },
         });
         yield* AWS.ApiGateway.Method("AgMockGet", {

@@ -2,20 +2,55 @@ import * as ag from "@distilled.cloud/aws/api-gateway";
 import * as Effect from "effect/Effect";
 import { deepEqual, isResolved } from "../../Diff.ts";
 import type { Input } from "../../Input.ts";
+import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
 
 export interface AuthorizerProps {
+  /**
+   * REST API identifier that owns the authorizer.
+   */
   restApiId: Input<string>;
-  name: string;
+  /**
+   * Authorizer name.
+   *
+   * If omitted, Alchemy generates a deterministic physical name.
+   */
+  name?: string;
+  /**
+   * Authorizer type.
+   */
   type: ag.AuthorizerType;
+  /**
+   * Cognito user pool ARNs for `COGNITO_USER_POOLS` authorizers.
+   */
   providerARNs?: string[];
+  /**
+   * Custom authorization type label.
+   */
   authType?: string;
+  /**
+   * Lambda invocation URI for `TOKEN` or `REQUEST` authorizers.
+   */
   authorizerUri?: string;
+  /**
+   * IAM role ARN used by API Gateway to invoke the authorizer.
+   *
+   * This is not secret key material; API Gateway stores the role ARN.
+   */
   authorizerCredentials?: string;
+  /**
+   * Identity source expression, e.g. `method.request.header.Authorization`.
+   */
   identitySource?: string;
+  /**
+   * Validation regex for token authorizers.
+   */
   identityValidationExpression?: string;
+  /**
+   * Cache TTL for authorizer results, in seconds.
+   */
   authorizerResultTtlInSeconds?: number;
 }
 
@@ -40,7 +75,6 @@ export interface Authorizer extends Resource<
  * ```typescript
  * const authorizer = yield* ApiGateway.Authorizer("Auth", {
  *   restApiId: api.restApiId,
- *   name: "lambda-auth",
  *   type: "TOKEN",
  *   authorizerUri: authorizerInvokeArn,
  *   identitySource: "method.request.header.Authorization",
@@ -50,6 +84,14 @@ export interface Authorizer extends Resource<
 const AuthorizerResource = Resource<Authorizer>("AWS.ApiGateway.Authorizer");
 
 export { AuthorizerResource as Authorizer };
+
+const generatedName = (id: string, props: AuthorizerProps) =>
+  props.name
+    ? Effect.succeed(props.name)
+    : createPhysicalName({
+        id,
+        maxLength: 128,
+      });
 
 export const AuthorizerProvider = () =>
   Provider.effect(
@@ -61,8 +103,10 @@ export const AuthorizerProvider = () =>
           if (!isResolved(newsIn)) return;
           const news = newsIn as AuthorizerProps;
           if (
+            // These fields define the authorizer identity and kind; replacement
+            // avoids patching a different authorizer shape in place.
             news.restApiId !== olds.restApiId ||
-            news.name !== olds.name ||
+            (news.name !== undefined && news.name !== olds.name) ||
             news.type !== olds.type
           ) {
             return { action: "replace" } as const;
@@ -94,14 +138,15 @@ export const AuthorizerProvider = () =>
             type: a.type!,
           };
         }),
-        create: Effect.fn(function* ({ news: newsIn, session }) {
+        create: Effect.fn(function* ({ id, news: newsIn, session }) {
           if (!isResolved(newsIn)) {
             return yield* Effect.die("Authorizer props were not resolved");
           }
           const news = newsIn as Input.ResolveProps<AuthorizerProps>;
+          const name = yield* generatedName(id, news);
           const a = yield* ag.createAuthorizer({
             restApiId: news.restApiId as string,
-            name: news.name,
+            name,
             type: news.type,
             providerARNs: news.providerARNs,
             authType: news.authType,
@@ -116,7 +161,7 @@ export const AuthorizerProvider = () =>
           return {
             authorizerId: a.id,
             restApiId: news.restApiId as string,
-            name: news.name,
+            name,
             type: news.type,
           };
         }),
