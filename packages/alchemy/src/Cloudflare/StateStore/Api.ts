@@ -24,17 +24,27 @@ export const STATE_STORE_SCRIPT_NAME = "alchemy-state-store" as const;
 /**
  * Path on disk to *this* file, used as the worker's bundling entry.
  *
- * Resolved via the package name (`alchemy/Cloudflare/StateStore/Api.ts`)
- * rather than `import.meta.filename`, so it keeps pointing at the original
- * source file even after this module is inlined into the CLI's
- * `bin/alchemy.js` bundle. `import.meta.filename` in the bundled case
- * would resolve to `bin/alchemy.js` — which has no `default` export and
- * breaks the worker bundler with
- * `[MISSING_EXPORT] "default" is not exported by "bin/alchemy.js"`.
+ * Two runtimes evaluate this module:
+ *   1. The alchemy CLI (node/bun), at deploy time, where we need a real
+ *      on-disk path so the worker bundler can find Api.ts. Bundled into
+ *      bin/alchemy.js, `import.meta.filename` would resolve to the bundle
+ *      itself (no `default` export → worker bundler dies). Resolve via the
+ *      package name instead so it keeps pointing at the source file.
+ *   2. The Cloudflare Workers runtime, after deploy, where this same module
+ *      *is* the worker entry. The `main` field is unused there, but the
+ *      top-level expression still evaluates — and `import.meta.resolve`
+ *      isn't a function in Workers, so an unguarded call crashes startup
+ *      with `(intermediate value).resolve is not a function`.
+ *
+ * Guard the resolve so the deploy path runs only where it works; in
+ * Workers, fall back to `import.meta.filename` (unused, just non-throwing).
  */
-const apiTsPath = fileURLToPath(
-  import.meta.resolve("alchemy/Cloudflare/StateStore/Api.ts"),
-);
+const apiTsPath =
+  typeof import.meta.resolve === "function"
+    ? fileURLToPath(
+        import.meta.resolve("alchemy/Cloudflare/StateStore/Api.ts"),
+      )
+    : (import.meta.filename ?? "");
 
 export default Worker(
   "Api",
