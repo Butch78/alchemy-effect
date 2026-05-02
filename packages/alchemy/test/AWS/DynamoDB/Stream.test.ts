@@ -25,17 +25,15 @@ describe.sequential("AWS.DynamoDB.Stream", () => {
         yield* stack.destroy();
 
         yield* Effect.logInfo("DynamoDB Stream test: deploying stream fixture");
-        const { table, queue, streamFunction } = yield* stack
-          .deploy(
-            Effect.gen(function* () {
-              const { table, queue } = yield* TableAndQueue;
+        const { table, queue, streamFunction } = yield* stack.deploy(
+          Effect.gen(function* () {
+            const { table, queue } = yield* TableAndQueue;
 
-              const func = yield* DynamoDBStreamFunction;
+            const func = yield* DynamoDBStreamFunction;
 
-              return { table, queue, streamFunction: func };
-            }),
-          )
-          .pipe(Effect.provide(DynamoDBStreamFunctionLive));
+            return { table, queue, streamFunction: func };
+          }).pipe(Effect.provide(DynamoDBStreamFunctionLive)),
+        );
 
         const streamState = yield* waitForTableStreamSpecification(
           table.tableName,

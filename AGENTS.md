@@ -500,6 +500,49 @@ Use `bun build:clean` when you encounter stale build artifacts or dependency iss
 3. `bun run build` - Builds the project
 4. `bun download:env` - Downloads environment files
 
+# Running Tests
+
+Tests in this repo are **slow and heavy** — many `test.provider` cases hit live AWS / Cloudflare APIs and take 30s–2min each. Plan accordingly: run tests once, capture full output, then inspect.
+
+## Hard rules
+
+- **NEVER pipe a test command into `tail`, `head`, `grep -c`, or any filter that doesn't preserve the full output.** Each pipe forces you to re-run the (expensive) tests when you realize you cut off the part you needed. Cost is doubled or tripled per iteration.
+- **NEVER run the same test twice in a row** to "see more output". Capture output once and re-read it.
+- **NEVER add `--reporter=verbose` or `DEBUG=1` and re-run** when the default output already failed — first read the full output you already produced.
+
+## How to actually run tests
+
+1. Redirect to a file (or rely on the background-shell terminal log) so you can re-inspect the full output without re-running:
+
+   ```bash
+   bun vitest run packages/alchemy/test/path/to/Foo.test.ts 2>&1 | tee /tmp/foo.test.log
+   ```
+
+   Then use `Read` / `Grep` against `/tmp/foo.test.log` for any subsequent inspection. Do not re-run the test to see different lines of output.
+
+2. For long-running suites, start the command in the background and poll the terminal file:
+
+   ```bash
+   # block_until_ms: 0 → returns immediately, output streams to terminals/<id>.txt
+   bun vitest run <paths> 2>&1 | tee /tmp/run.log
+   ```
+
+   Use `AwaitShell` with a generous `block_until_ms` and a regex like `Test Files\s+\d+ (passed|failed)` to wait for completion. Then `Read` the terminal file or `/tmp/run.log` once the run is done.
+
+3. Scope to the smallest set of files / cases that exercises your change:
+
+   - Single file: `bun vitest run packages/alchemy/test/AWS/SNS/Bindings.test.ts`
+   - Single test name: `bun vitest run packages/alchemy/test/apply.test.ts -t "circularity via bindings"`
+   - Unit-only sweep (fast, no live calls): `bun vitest run packages/alchemy/test/apply.test.ts packages/alchemy/test/plan.test.ts packages/alchemy/test/Output.test.ts`
+
+4. `bun run test` runs the **full live suite** (`scripts/test.ts` → `bun vitest run`). It can take many minutes and requires AWS / Cloudflare credentials. Only run it when you actually need full coverage; otherwise scope.
+
+## Debugging tests
+
+When you need to add diagnostic logging, prefer adding it once, running the test once, capturing the full output, and removing the logs once you have what you need. Do **not** iterate by re-running the test for each new `console.error` you want to try — batch your instrumentation.
+
+Tests requiring orchestration with localstack run via `bun run test:local` (sets `LOCAL=1`). `bun run test:fast` filters to fast unit tests via the `FAST` env var.
+
 # Pull Request Conventions
 
 When you automatically open a PR, it MUST follow this structure:

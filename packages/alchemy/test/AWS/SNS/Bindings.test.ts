@@ -30,22 +30,20 @@ describe.sequential("SNS Bindings", () => {
         }
 
         yield* Effect.logInfo("SNS test setup: deploying fixture");
-        const deployed = yield* stack
-          .deploy(
-            Effect.gen(function* () {
-              const { topic, queue, subscription } = yield* TopicAndQueue;
+        const deployed = yield* stack.deploy(
+          Effect.gen(function* () {
+            const { topic, queue, subscription } = yield* TopicAndQueue;
 
-              const apiFunction = yield* SNSApiFunction;
+            const apiFunction = yield* SNSApiFunction;
 
-              return {
-                apiFunction,
-                topic,
-                queue,
-                subscription,
-              };
-            }),
-          )
-          .pipe(Effect.provide(SNSApiFunctionLive));
+            return {
+              apiFunction,
+              topic,
+              queue,
+              subscription,
+            };
+          }).pipe(Effect.provide(SNSApiFunctionLive)),
+        );
 
         const baseUrl = deployed.apiFunction.functionUrl!.replace(/\/+$/, "");
         const queueUrl = deployed.queue.queueUrl;
