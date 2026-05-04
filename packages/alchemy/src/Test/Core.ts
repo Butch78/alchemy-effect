@@ -5,6 +5,7 @@ import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
+import { AdoptPolicy } from "../AdoptPolicy.ts";
 import type { AlchemyContext } from "../AlchemyContext.ts";
 import { AlchemyContextLive } from "../AlchemyContext.ts";
 import { apply } from "../Apply.ts";
@@ -41,6 +42,12 @@ export interface MakeOptions<ROut = any> {
   profile?: string;
   /** Default stage for deploy/destroy (default `"test"`). */
   stage?: string;
+  /**
+   * Engine-level adoption policy for this test run. When `true`, resources
+   * without prior state will be adopted from the cloud via `provider.read`
+   * (matching the CLI's `--adopt` flag). Defaults to `false`.
+   */
+  adopt?: boolean;
 }
 
 export type TestEffect<A, Req = never> = StackEffect<A, any, Req>;
@@ -74,6 +81,7 @@ export const toEffect = <A>(
       Effect.provide(Layer.succeed(ConfigProvider, configProvider)),
     );
   }).pipe(
+    Effect.provideService(AdoptPolicy, options.adopt ?? false),
     Effect.provideService(AuthProviders, {}),
     Effect.provide(options.state ?? State.localState()),
     Effect.provide(Layer.provideMerge(alchemyLayer, platformLayer)),
