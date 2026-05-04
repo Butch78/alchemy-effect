@@ -11,9 +11,7 @@
     "directory": "packages/triage"
   },
   "files": [
-    "lib",
-    "src",
-    "migrations"
+    "src"
   ],
   "scripts": {
     "build": "bun pm pack"
@@ -23,7 +21,7 @@
       "types": "./src/index.ts",
       "bun": "./src/index.ts",
       "worker": "./src/index.ts",
-      "import": "./lib/index.js"
+      "import": "./src/index.ts"
     }
   },
   "dependencies": {

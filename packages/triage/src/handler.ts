@@ -2,53 +2,54 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
 import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { IssuesDB } from "./IssuesDB.ts";
-import {
-  fingerprint,
-  getIssue,
-  listIssues,
-  setDiscordMessageId,
-  upsertIssue,
-  type Issue,
-  type IssueStatus,
-} from "./IssueStore.ts";
-import {
-  classifyEvent,
-  type RawEvent,
-  type TriageDecision,
-} from "./Triage.ts";
+import IndexDO, { INDEX_DO_NAME } from "./IndexDO.ts";
+import ProjectDO from "./ProjectDO.ts";
+import type {
+  Issue,
+  IssueStatus,
+  ProjectListEntry,
+  ProjectMeta,
+  ProjectSummary,
+  RawEvent,
+  TriageDecision,
+} from "./Types.ts";
 
 export interface HandlerOptions {
   /**
-   * Workers AI model to use for classification.
+   * Workers AI model used for both per-event classification and per-project
+   * summarization. The same model is fine in practice — the prompts differ.
+   *
    * @default "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
    */
   model?: string;
   /**
-   * Discord webhook URL the triage worker posts new issues to. When omitted
-   * the handler reads `DISCORD_WEBHOOK_URL` from the worker env at runtime.
+   * Discord webhook URL the triage worker posts new issues to. Falls back
+   * to the `DISCORD_WEBHOOK_URL` worker env var.
    */
   discordWebhookUrl?: string;
   /**
-   * Shared secret expected on the `Authorization: Bearer ...` header of the
-   * `/webhooks/axiom` route. When omitted the handler reads
-   * `TRIAGE_WEBHOOK_SECRET` from the worker env.
+   * Shared secret expected on `Authorization: Bearer ...` for the
+   * `/webhooks/axiom` route. Falls back to the `TRIAGE_WEBHOOK_SECRET`
+   * worker env var.
    */
   webhookSecret?: string;
   /**
    * Severity threshold below which we won't post to Discord. 1..5.
-   * @default 2
+   * @default 3
    */
   discordSeverityFloor?: number;
+  /**
+   * The fallback project id used when an event arrives without telemetry
+   * resource attributes (e.g. an unrelated tenant manually POSTing). Set
+   * this to a stable string per deployment to avoid filling the index
+   * with `unknown` projects.
+   *
+   * @default "unknown"
+   */
+  unknownProjectId?: string;
 }
-
-const bindings = Layer.mergeAll(
-  Cloudflare.AILive,
-  Cloudflare.D1ConnectionLive,
-);
 
 class Unauthorized extends Data.TaggedError("Unauthorized")<{}> {}
 
@@ -75,24 +76,29 @@ const requireAuth = (expected: string | undefined) =>
  * ) {}
  * ```
  *
+ * Storage architecture: every event is sharded into a per-project Durable
+ * Object addressed by `alchemy.git.root_commit` (the canonical project id
+ * emitted by `packages/alchemy/src/Telemetry/Attributes.ts`). The DO holds
+ * the raw event log, rolling counters, the per-project issue catalog, and
+ * the latest AI summary. A single `IndexDO` mirrors a sortable list of
+ * projects + a sortable list of top issues so cross-project endpoints
+ * don't have to fan out.
+ *
  * Routes:
  *
- * - `POST /webhooks/axiom` — accepts an Axiom Monitor / customWebhook payload.
- *   Body shape:
- *   ```json
- *   {
- *     "events": [ { "timestamp": 0, "message": "...", "errorType": "...", ... } ],
- *     "axiomQuery": "['stage-logs'] | where ...",
- *     "monitorName": "..."
- *   }
- *   ```
- * - `GET  /issues?status=open` — list issues, ordered by severity then recency.
- * - `GET  /issues/:id` — fetch a single issue.
+ * - `POST /webhooks/axiom`  — Axiom Monitor / customWebhook payload.
+ * - `GET  /projects`        — list known projects, ordered by recency.
+ * - `GET  /projects/:id`    — return the project's meta + AI summary +
+ *                              top resources/errors.
+ * - `POST /projects/:id/summarize` — force the summarizer to run now.
+ * - `GET  /projects/:id/issues`    — issues belonging to a single project.
+ * - `GET  /projects/:id/events`    — raw events (newest first).
+ * - `GET  /issues`          — top issues across every project.
  */
 export const handler = (options: HandlerOptions = {}) =>
   Effect.gen(function* () {
-    const ai = yield* Cloudflare.AI.bind();
-    const db = yield* Cloudflare.D1Connection.bind(yield* IssuesDB);
+    const projects = yield* ProjectDO;
+    const index = yield* IndexDO;
 
     const expectedSecret =
       options.webhookSecret ??
@@ -102,7 +108,12 @@ export const handler = (options: HandlerOptions = {}) =>
       options.discordWebhookUrl ??
       (yield* readOptionalConfig("DISCORD_WEBHOOK_URL"));
 
-    const discordFloor = options.discordSeverityFloor ?? 2;
+    const discordFloor = options.discordSeverityFloor ?? 3;
+    const unknownProjectId = options.unknownProjectId ?? "unknown";
+    const model = options.model;
+
+    const projectStub = (projectId: string) => projects.getByName(projectId);
+    const indexStub = index.getByName(INDEX_DO_NAME);
 
     const postToDiscord = (issue: Issue, decision: TriageDecision) =>
       Effect.gen(function* () {
@@ -117,17 +128,17 @@ export const handler = (options: HandlerOptions = {}) =>
               color: severityColor(decision.severity),
               fields: [
                 {
+                  name: "Project",
+                  value: `\`${issue.projectId}\``,
+                  inline: true,
+                },
+                {
                   name: "Occurrences",
                   value: String(issue.occurrences),
                   inline: true,
                 },
                 {
-                  name: "Status",
-                  value: issue.status,
-                  inline: true,
-                },
-                {
-                  name: "Issue ID",
+                  name: "Issue",
                   value: `\`${issue.id}\``,
                   inline: true,
                 },
@@ -159,57 +170,68 @@ export const handler = (options: HandlerOptions = {}) =>
           catch: () => new Error("discord parse failed"),
         }).pipe(Effect.orElseSucceed(() => ({}) as { id?: string })));
         if (body.id) {
-          yield* setDiscordMessageId(db, issue.id, body.id);
+          yield* projectStub(issue.projectId).setDiscordMessageId(
+            issue.id,
+            body.id,
+          );
         }
       }).pipe(Effect.catch(() => Effect.void));
 
-    const triageOne = (event: RawEvent) =>
+    const triageOne = (rawEvent: RawEvent) =>
       Effect.gen(function* () {
-        const id = fingerprint([
-          event.errorType ?? "",
-          event.location ?? "",
-          event.service ?? "",
-          event.message,
-        ]);
-        const decision = yield* classifyEvent(ai, event, options.model);
-        const now = event.timestamp || Date.now();
-        const issue = yield* upsertIssue(db, {
-          id,
-          title: decision.title,
-          summary: decision.summary,
-          severity: decision.severity,
-          status: "open",
-          occurrences: 1,
-          firstSeen: now,
-          lastSeen: now,
-          axiomQuery: event.axiomQuery ?? null,
-          sampleEvent: {
-            message: event.message,
-            errorType: event.errorType,
-            service: event.service,
-            location: event.location,
-            attributes: event.attributes,
-          },
-          prUrl: null,
-          discordMessageId: null,
+        const projectId = rawEvent.projectId ?? unknownProjectId;
+        const event: RawEvent = { ...rawEvent, projectId };
+        const stub = projectStub(projectId);
+
+        const result = yield* stub.recordEvent(event, {
+          classifyModel: model,
         });
-        // Only ping Discord on the first occurrence to avoid spam. The
-        // upserted row's `occurrences` is post-increment, so == 1 means new.
-        if (issue.occurrences <= 1) {
-          yield* postToDiscord(issue, decision);
+
+        // Mirror project + (if it's an issue) issue into the cross-project
+        // IndexDO. Fire-and-forget — the source of truth is the ProjectDO.
+        yield* Effect.forkChild(
+          Effect.gen(function* () {
+            const meta = yield* stub.getMeta();
+            if (!meta) return;
+            yield* indexStub.recordProject(toListEntry(meta));
+            yield* indexStub.recordIssue({
+              projectId,
+              fingerprint: result.issue.id,
+              title: result.issue.title,
+              severity: result.issue.severity,
+              status: result.issue.status,
+              occurrences: result.issue.occurrences,
+              lastSeen: result.issue.lastSeen,
+            });
+          }),
+        );
+
+        if (result.isNew) {
+          yield* Effect.forkChild(
+            postToDiscord(result.issue, result.decision),
+          );
         }
-        return { id, decision, occurrences: issue.occurrences };
+
+        return {
+          projectId,
+          fingerprint: result.fingerprint,
+          decision: result.decision,
+          occurrences: result.issue.occurrences,
+        };
       });
 
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest;
-        const url = new URL(request.url, `https://${request.headers.host ?? "localhost"}`);
+        const url = new URL(
+          request.url,
+          `https://${request.headers.host ?? "localhost"}`,
+        );
         const path = url.pathname;
         const method = request.method;
 
         if (method === "POST" && path === "/webhooks/axiom") {
-          return yield* Effect.gen(function* () {
+          const inner = Effect.gen(function* () {
             yield* requireAuth(expectedSecret);
             const text = yield* request.text;
             const body = parseWebhookPayload(text);
@@ -219,41 +241,94 @@ export const handler = (options: HandlerOptions = {}) =>
                 { status: 200 },
               );
             }
-            const results = yield* Effect.forEach(body.events, triageOne);
+            const results = yield* Effect.forEach(body.events, triageOne, {
+              concurrency: 4,
+            });
             return yield* HttpServerResponse.json({
               ok: true,
               triaged: results.length,
-              issues: results,
+              results,
             });
-          }).pipe(
-            Effect.catchTag("Unauthorized", () =>
-              HttpServerResponse.json(
-                { error: "unauthorized" },
-                { status: 401 },
-              ),
+          });
+          return yield* Effect.catchTag(inner, "Unauthorized", () =>
+            HttpServerResponse.json(
+              { error: "unauthorized" },
+              { status: 401 },
             ),
           );
         }
 
-        if (method === "GET" && path === "/issues") {
-          const status = url.searchParams.get("status") as IssueStatus | null;
-          const limit = Number(url.searchParams.get("limit") ?? 50);
-          const issues = yield* listIssues(db, {
-            status: status ?? undefined,
-            limit,
-          });
-          return yield* HttpServerResponse.json({ issues });
+        // ------------------------------------------------------------------
+        // /projects
+        // ------------------------------------------------------------------
+
+        if (method === "GET" && path === "/projects") {
+          const limit = clampLimit(url.searchParams.get("limit"));
+          const list = yield* indexStub.listProjects(limit);
+          return yield* HttpServerResponse.json({ projects: list });
         }
 
-        const issueMatch = path.match(/^\/issues\/([a-f0-9]{16})$/i);
-        if (method === "GET" && issueMatch) {
-          const issue = yield* getIssue(db, issueMatch[1]!);
-          return issue
-            ? yield* HttpServerResponse.json({ issue })
-            : yield* HttpServerResponse.json(
+        const projectMatch = path.match(
+          /^\/projects\/([^/]+)(?:\/(summarize|issues|events))?$/,
+        );
+        if (projectMatch) {
+          const [, projectId, sub] = projectMatch;
+          const stub = projectStub(projectId!);
+
+          if (method === "POST" && sub === "summarize") {
+            const summary = yield* stub.summarizeNow(model);
+            return summary
+              ? yield* HttpServerResponse.json({ summary })
+              : yield* HttpServerResponse.json(
+                  { error: "no events yet" },
+                  { status: 404 },
+                );
+          }
+
+          if (method === "GET" && sub === "issues") {
+            const status = url.searchParams.get("status") as
+              | IssueStatus
+              | null;
+            const limit = clampLimit(url.searchParams.get("limit"));
+            const issues = yield* stub.listIssues({
+              status: status ?? undefined,
+              limit,
+            });
+            return yield* HttpServerResponse.json({ issues });
+          }
+
+          if (method === "GET" && sub === "events") {
+            const limit = clampLimit(url.searchParams.get("limit"), 100, 500);
+            const events = yield* stub.listEvents(limit);
+            return yield* HttpServerResponse.json({ events });
+          }
+
+          if (method === "GET" && !sub) {
+            const [meta, summary] = yield* Effect.all([
+              stub.getMeta(),
+              stub.getSummary(),
+            ]);
+            if (!meta) {
+              return yield* HttpServerResponse.json(
                 { error: "not found" },
                 { status: 404 },
               );
+            }
+            return yield* HttpServerResponse.json({
+              project: meta,
+              summary,
+            });
+          }
+        }
+
+        // ------------------------------------------------------------------
+        // /issues — cross-project list (mirrored in IndexDO)
+        // ------------------------------------------------------------------
+
+        if (method === "GET" && path === "/issues") {
+          const limit = clampLimit(url.searchParams.get("limit"));
+          const issues = yield* indexStub.listIssues(limit);
+          return yield* HttpServerResponse.json({ issues });
         }
 
         if (method === "GET" && path === "/health") {
@@ -272,13 +347,30 @@ export const handler = (options: HandlerOptions = {}) =>
         ),
       ),
     };
-  }).pipe(Effect.provide(bindings), Effect.orDie);
+  }).pipe(Effect.provide(Cloudflare.AILive), Effect.orDie);
 
 const readOptionalConfig = (name: string) =>
   Effect.gen(function* () {
     const opt = yield* Config.string(name).pipe(Config.option);
     return opt._tag === "Some" ? opt.value : undefined;
   });
+
+const clampLimit = (raw: string | null, def = 50, max = 200): number => {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(max, Math.max(1, Math.floor(n)));
+};
+
+const toListEntry = (meta: ProjectMeta): ProjectListEntry => ({
+  projectId: meta.projectId,
+  userId: meta.userId,
+  gitOriginHash: meta.gitOriginHash,
+  alchemyVersion: meta.alchemyVersion,
+  eventCount: meta.eventCount,
+  errorCount: meta.errorCount,
+  lastSeen: meta.lastSeen,
+  hasSummary: meta.lastAnalyzed != null,
+});
 
 interface WebhookPayload {
   events: RawEvent[];
@@ -292,77 +384,141 @@ const parseWebhookPayload = (text: string): WebhookPayload => {
   } catch {
     return { events: [] };
   }
-  // Axiom Monitor "MatchEvent" notifier posts one event; "Threshold" posts an
-  // aggregate. We accept three shapes:
+  // Three accepted shapes:
   //   1. { events: [...] }
-  //   2. Axiom Monitor MatchEvent: { matchedEvent: {...}, query, monitor: { name } }
-  //   3. Axiom Monitor Threshold:  { aggregations: [...], query, monitor: { name } }
+  //   2. Axiom Monitor MatchEvent: { matchedEvent, query, monitor }
+  //   3. Axiom Monitor Threshold:  { aggregations: [...], query, monitor }
   if (Array.isArray(parsed?.events)) {
-    return { events: parsed.events.map(coerce) };
+    return {
+      events: parsed.events.map((e: any) => coerce(e, parsed.query)),
+    };
   }
   if (parsed?.matchedEvent) {
     return {
-      events: [
-        coerce({
-          ...parsed.matchedEvent,
-          axiomQuery: parsed.query,
-        }),
-      ],
+      events: [coerce(parsed.matchedEvent, parsed.query)],
     };
   }
   if (Array.isArray(parsed?.aggregations)) {
     return {
       events: parsed.aggregations.map((row: any) =>
-        coerce({
-          message:
-            parsed.monitor?.name ??
-            `aggregate over ${Object.keys(row).join(",")}`,
-          attributes: row,
-          axiomQuery: parsed.query,
-        }),
+        coerce(
+          {
+            message:
+              parsed.monitor?.name ??
+              `aggregate over ${Object.keys(row).join(",")}`,
+            attributes: row,
+            ...row,
+          },
+          parsed.query,
+        ),
       ),
     };
   }
-  // Otherwise treat the whole body as a single event.
-  return { events: [coerce(parsed)] };
+  return { events: [coerce(parsed, parsed?.query)] };
 };
 
-const coerce = (raw: any): RawEvent => ({
-  timestamp:
-    typeof raw.timestamp === "number"
-      ? raw.timestamp
-      : raw._time
-        ? new Date(raw._time).getTime()
-        : Date.now(),
-  message:
-    typeof raw.message === "string"
-      ? raw.message
-      : raw.body ??
-        raw.name ??
-        raw.event ??
-        JSON.stringify(raw).slice(0, 500),
-  errorType: raw.errorType ?? raw["error.type"] ?? raw.type ?? undefined,
-  service: raw.service ?? raw["service.name"] ?? undefined,
-  location: raw.location ?? raw["code.filepath"] ?? undefined,
-  attributes:
-    raw.attributes && typeof raw.attributes === "object"
-      ? (raw.attributes as Record<string, unknown>)
-      : undefined,
-  axiomQuery:
-    typeof raw.axiomQuery === "string" ? raw.axiomQuery : undefined,
-});
+const coerce = (raw: any, fallbackQuery?: string): RawEvent => {
+  const resourceAttrs =
+    (raw?.["resource.attributes"] as Record<string, unknown> | undefined) ??
+    (raw?.resource?.attributes as Record<string, unknown> | undefined) ??
+    undefined;
+
+  const projectId = pickStr(
+    raw?.projectId,
+    raw?.project_id,
+    raw?.["alchemy.git.root_commit"],
+    resourceAttrs?.["alchemy.git.root_commit"],
+    raw?.["alchemy.git.origin_hash"],
+    resourceAttrs?.["alchemy.git.origin_hash"],
+  );
+
+  const userId = pickStr(
+    raw?.userId,
+    raw?.user_id,
+    raw?.["alchemy.user.id"],
+    resourceAttrs?.["alchemy.user.id"],
+  );
+
+  const gitOriginHash = pickStr(
+    raw?.["alchemy.git.origin_hash"],
+    resourceAttrs?.["alchemy.git.origin_hash"],
+  );
+
+  const gitBranchHash = pickStr(
+    raw?.["alchemy.git.branch_hash"],
+    resourceAttrs?.["alchemy.git.branch_hash"],
+  );
+
+  const alchemyVersion = pickStr(
+    raw?.["alchemy.version"],
+    resourceAttrs?.["alchemy.version"],
+  );
+
+  const attrs =
+    (raw?.attributes as Record<string, unknown> | undefined) ?? undefined;
+
+  return {
+    timestamp:
+      typeof raw?.timestamp === "number"
+        ? raw.timestamp
+        : raw?._time
+          ? new Date(raw._time).getTime()
+          : Date.now(),
+    message:
+      typeof raw?.message === "string"
+        ? raw.message
+        : (raw?.body ??
+          raw?.name ??
+          raw?.event ??
+          JSON.stringify(raw ?? {}).slice(0, 500)),
+    errorType: pickStr(
+      raw?.errorType,
+      raw?.["error.type"],
+      raw?.type,
+      attrs?.["exception.type"],
+    ),
+    service: pickStr(raw?.service, raw?.["service.name"]),
+    location: pickStr(raw?.location, raw?.["code.filepath"]),
+    resourceType: pickStr(
+      raw?.resourceType,
+      raw?.resource_type,
+      attrs?.resource_type,
+    ),
+    resourceOp: pickStr(raw?.resourceOp, raw?.op, attrs?.op),
+    status: pickStr(raw?.status, attrs?.status),
+    projectId,
+    userId,
+    gitOriginHash,
+    gitBranchHash,
+    alchemyVersion,
+    attributes: attrs,
+    axiomQuery:
+      typeof raw?.axiomQuery === "string" ? raw.axiomQuery : fallbackQuery,
+  };
+};
+
+const pickStr = (...values: unknown[]): string | undefined => {
+  for (const v of values) {
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return undefined;
+};
 
 const severityColor = (severity: number): number => {
   switch (severity) {
     case 5:
-      return 0xb91c1c; // red-700
+      return 0xb91c1c;
     case 4:
-      return 0xea580c; // orange-600
+      return 0xea580c;
     case 3:
-      return 0xeab308; // yellow-500
+      return 0xeab308;
     case 2:
-      return 0x3b82f6; // blue-500
+      return 0x3b82f6;
     default:
-      return 0x6b7280; // gray-500
+      return 0x6b7280;
   }
 };
+
+// Re-export for the type's `ProjectSummary` reference if a downstream caller
+// imports the handler module without going through the package entry point.
+export type { ProjectSummary };

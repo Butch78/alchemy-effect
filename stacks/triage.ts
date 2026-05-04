@@ -15,8 +15,17 @@ import {
 import TriageWorker from "./triage/Worker.ts";
 
 /**
- * Triage stack. Wires Axiom OTEL signals through Cloudflare Workers AI into a
- * D1-backed issue catalog, with Discord notifications on first detection.
+ * Triage stack. Wires Axiom OTEL signals through Cloudflare Workers AI into
+ * per-project Durable Objects, with Discord notifications on first detection.
+ *
+ * Storage architecture: every event is sharded into a per-project Durable
+ * Object addressed by the `alchemy.git.root_commit` attribute set by the
+ * alchemy CLI's telemetry layer. Each `ProjectDO` keeps the raw event log
+ * forever, runs an alarm-driven AI summarizer to answer "what is this user
+ * trying to build / what errors are they hitting", and owns its own issue
+ * catalog. A single `IndexDO` mirrors a sortable cross-project list so the
+ * Discord slash command and `/projects` / `/issues` endpoints don't have
+ * to fan out.
  *
  * Configuration (`Config`):
  * - `DISCORD_BOT_TOKEN`         — bot token (consumed by `alchemy/Discord`)
@@ -25,13 +34,12 @@ import TriageWorker from "./triage/Worker.ts";
  * - `DISCORD_GUILD_ID` (opt.)   — register `/triage` in this guild only
  *
  * What it provisions:
- * - `Triage.IssuesDB`    — D1 with migrations
- * - `TriageWorker`       — Cloudflare Worker (Triage.handler)
+ * - `TriageWorker`       — Cloudflare Worker hosting `ProjectDO` + `IndexDO`
  * - `TriageDiscordApp`   — imports the bot
  * - `TriageChannelWebhook` — channel webhook
  * - `Discord.SlashCommand` — `/triage [status]`
  * - `Axiom.Notifier`     — customWebhook pointing at the worker
- * - `Axiom.Monitor` x 2  — error-rate (logs) + provider-error-rate (traces)
+ * - `Axiom.Monitor` x 2  — error stream (logs) + resource activity stream (traces)
  */
 export default Alchemy.Stack(
   "AlchemyTriage",
@@ -78,7 +86,6 @@ export default Alchemy.Stack(
       ],
     });
 
-    const db = yield* Triage.IssuesDB;
     const worker = yield* TriageWorker;
     const traces = yield* Traces;
     const logs = yield* Logs;
@@ -96,10 +103,14 @@ export default Alchemy.Stack(
       },
     });
 
+    // Errors stream — every ERROR/FATAL log gets classified and folded into
+    // its project's ProjectDO. Project attribution flows through via the
+    // `alchemy.git.root_commit` resource attribute set by the alchemy CLI's
+    // telemetry layer (packages/alchemy/src/Telemetry/Attributes.ts).
     yield* Axiom.Monitor("ErrorRate", {
       name: "Error rate (logs)",
       description:
-        "Fires for every log event with severity >= ERROR so the triage worker can classify it.",
+        "Fires for every log event with severity >= ERROR so the triage worker can classify it and attach it to its project.",
       type: "MatchEvent",
       aplQuery: Output.interpolate`
         ['${logs.name}']
@@ -108,35 +119,48 @@ export default Alchemy.Stack(
                   service=tostring(['resource.attributes']['service.name']),
                   errorType=tostring(['attributes']['exception.type']),
                   location=tostring(['attributes']['code.filepath']),
-                  attributes=['attributes']
+                  attributes=['attributes'],
+                  projectId=tostring(['resource.attributes']['alchemy.git.root_commit']),
+                  userId=tostring(['resource.attributes']['alchemy.user.id']),
+                  ['alchemy.git.origin_hash']=tostring(['resource.attributes']['alchemy.git.origin_hash']),
+                  ['alchemy.git.branch_hash']=tostring(['resource.attributes']['alchemy.git.branch_hash']),
+                  ['alchemy.version']=tostring(['resource.attributes']['alchemy.version'])
       `,
       intervalMinutes: 1,
       rangeMinutes: 1,
       notifierIds: [notifier.id],
     });
 
-    yield* Axiom.Monitor("ProviderErrorRate", {
-      name: "Resource provider error rate",
+    // Resource activity stream — every provider.* span (success or error)
+    // ships to the worker so each ProjectDO can roll up "what is this user
+    // building" without us doing a separate Axiom query at summary time.
+    yield* Axiom.Monitor("ResourceActivity", {
+      name: "Resource activity (traces)",
       description:
-        "Threshold: fires when more than 5 provider.* spans error in 5 min.",
-      type: "Threshold",
+        "Fires for every provider.* lifecycle span so the triage worker can attribute resource usage to its owning project.",
+      type: "MatchEvent",
       aplQuery: Output.interpolate`
         ['${traces.name}']
-        | where name startswith "provider." and tobool(['error'])
-        | summarize errors=count() by bin_auto(_time)
+        | where name startswith "provider."
+        | project _time, message=name,
+                  resourceType=tostring(['attributes']['alchemy.resource.type']),
+                  resourceOp=tostring(['attributes']['alchemy.resource.op']),
+                  status=iif(tobool(['error']), "error", "success"),
+                  service=tostring(['resource.attributes']['service.name']),
+                  attributes=['attributes'],
+                  projectId=tostring(['resource.attributes']['alchemy.git.root_commit']),
+                  userId=tostring(['resource.attributes']['alchemy.user.id']),
+                  ['alchemy.git.origin_hash']=tostring(['resource.attributes']['alchemy.git.origin_hash']),
+                  ['alchemy.git.branch_hash']=tostring(['resource.attributes']['alchemy.git.branch_hash']),
+                  ['alchemy.version']=tostring(['resource.attributes']['alchemy.version'])
       `,
-      operator: "Above",
-      threshold: 5,
-      intervalMinutes: 5,
-      rangeMinutes: 5,
-      alertOnNoData: false,
-      resolvable: true,
+      intervalMinutes: 1,
+      rangeMinutes: 1,
       notifierIds: [notifier.id],
     });
 
     return {
       workerUrl: worker.url.as<string>(),
-      issuesDbId: db.databaseId,
       discordWebhookUrl: channelWebhook.url,
     };
   }).pipe(Effect.orDie),
