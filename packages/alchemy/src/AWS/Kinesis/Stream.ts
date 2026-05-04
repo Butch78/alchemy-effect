@@ -704,7 +704,10 @@ export const StreamProvider = () =>
           }
 
           const internalTags = yield* createInternalTags(id);
-          const oldTags = { ...internalTags, ...olds.tags };
+          // Use the cloud's actual tags as the "previous state" so that an
+          // adoption-takeover correctly rewrites ownership tags on the
+          // stream.
+          const oldTags = output.tags ?? {};
           const newTags = { ...internalTags, ...news.tags };
           const { removed, upsert } = diffTags(oldTags, newTags);
 

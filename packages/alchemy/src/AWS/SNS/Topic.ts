@@ -236,10 +236,11 @@ export const TopicProvider = () =>
         ...(yield* createInternalTags(id)),
         ...news.tags,
       };
-      const oldTags = {
-        ...(yield* createInternalTags(id)),
-        ...olds.tags,
-      };
+      // Use the cloud's actual tags as the "previous state" so that an
+      // adoption-takeover (where olds.tags == news.tags but the cloud tags
+      // identify a different logical id) correctly rewrites ownership
+      // tags on the topic.
+      const oldTags = output.tags ?? {};
       const { removed, upsert } = diffTags(oldTags, newTags);
 
       if (upsert.length > 0) {

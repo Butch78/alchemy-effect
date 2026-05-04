@@ -1110,7 +1110,9 @@ export const TableProvider = () =>
             });
           }
 
-          const oldTags = yield* createTags(id, olds.tags);
+          // Use the cloud's actual tags as the "previous state" so an
+          // adoption-takeover rewrites ownership tags on the table.
+          const oldTags = output.tags ?? {};
           const newTags = yield* createTags(id, news.tags);
           const { removed, upsert } = diffTags(oldTags, newTags);
 

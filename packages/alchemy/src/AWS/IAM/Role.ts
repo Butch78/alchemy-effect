@@ -401,10 +401,11 @@ export const RoleProvider = () =>
             news: news.inlinePolicies ?? {},
           });
 
-          const oldTags = {
-            ...(yield* createInternalTags(id)),
-            ...olds.tags,
-          };
+          // Use the cloud's actual tags as the "previous state" so that an
+          // adoption-takeover (where olds.tags == news.tags but the cloud
+          // tags identify a different logical id) correctly rewrites the
+          // ownership tags on the role.
+          const oldTags = output.tags ?? {};
           const newTags = {
             ...(yield* createInternalTags(id)),
             ...news.tags,

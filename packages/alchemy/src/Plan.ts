@@ -463,6 +463,12 @@ export const make = <A>(
             //                                      update overwrite tags / etc.
             //   - unowned + adopt disabled       → fail with
             //                                      `OwnedBySomeoneElse`.
+            // When `read` returns an `Unowned`-branded result, a takeover is
+            // happening: the engine will run the resource's normal `update`
+            // path so the provider rewrites ownership tags / etc. with our
+            // logical id. For owned (plain) attrs, adoption is silent and
+            // the resource stays a noop.
+            let forceUpdateAfterTakeover = false;
             if (oldState === undefined && provider.read) {
               const adoptInstanceId = yield* generateInstanceId();
               const readResult = yield* provider
@@ -507,6 +513,7 @@ export const make = <A>(
                   value: adoptedState,
                 });
                 oldState = adoptedState;
+                forceUpdateAfterTakeover = isUnowned;
               }
             }
 
@@ -596,6 +603,15 @@ export const make = <A>(
                   ? ({
                       action: "update",
                     } satisfies UpdateDiff)
+                  : diff,
+              ),
+              // After taking over an `Unowned` resource, force at least an
+              // update so the provider rewrites ownership tags / config to
+              // reflect the new logical id (otherwise the takeover would
+              // noop and the resource would still appear foreign-owned).
+              Effect.map((diff) =>
+                forceUpdateAfterTakeover && diff.action === "noop"
+                  ? ({ action: "update" } satisfies UpdateDiff)
                   : diff,
               ),
             );
