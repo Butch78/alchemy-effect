@@ -1,4 +1,5 @@
 import * as kinesis from "@distilled.cloud/aws/kinesis";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 import { Unowned } from "../../AdoptPolicy.ts";
@@ -150,22 +151,45 @@ const readConsumer = Effect.fn(function* ({
   });
 });
 
+// Kinesis tells us "in use" via ResourceInUseException, but the consumer
+// registry is eventually consistent — describeStreamConsumer can briefly
+// return ResourceNotFoundException for a consumer the registry just
+// confirmed exists. Poll up to ~10s before giving up.
+class ConsumerRegistryNotConsistent extends Data.TaggedError(
+  "ConsumerRegistryNotConsistent",
+)<{ consumerName: string }> {}
+
 const adoptExistingConsumer = Effect.fn(function* (
   streamArn: string,
   consumerName: string,
 ) {
-  const state = yield* readConsumer({
-    streamArn,
-    consumerName,
-  });
+  return yield* Effect.gen(function* () {
+    const state = yield* readConsumer({
+      streamArn,
+      consumerName,
+    });
 
-  if (!state) {
-    return yield* Effect.fail(
-      new Error(`consumer ${consumerName} exists but could not be read`),
-    );
-  }
+    if (!state) {
+      return yield* new ConsumerRegistryNotConsistent({ consumerName });
+    }
 
-  return state;
+    return state;
+  }).pipe(
+    Effect.retry({
+      while: (e) => e._tag === "ConsumerRegistryNotConsistent",
+      schedule: Schedule.exponential(250).pipe(
+        Schedule.both(Schedule.recurs(8)),
+      ),
+    }),
+    Effect.catchTag("ConsumerRegistryNotConsistent", () =>
+      Effect.fail(
+        new Error(
+          `consumer ${consumerName} exists but could not be read after ` +
+            `~10s of registry-consistency retries`,
+        ),
+      ),
+    ),
+  );
 });
 
 const waitForConsumerStatus = (
