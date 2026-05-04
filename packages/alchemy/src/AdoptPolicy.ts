@@ -53,10 +53,16 @@ export class OwnedBySomeoneElse extends Data.TaggedError("OwnedBySomeoneElse")<{
 }> {}
 
 /**
- * @internal symbol used to brand attribute objects returned by `read` as
+ * Private symbol used to brand attribute objects returned by `read` as
  * "exists in cloud, but not owned by this stack/stage/logical-id".
+ *
+ * Deliberately *not* registered via `Symbol.for` — the brand is an
+ * engine-internal routing hint and must not be observable or
+ * forgeable from outside this module. The engine strips it before any
+ * state persistence (see {@link stripUnowned}) so it never leaks into
+ * the state store, JSON serialization, or downstream `Output`s.
  */
-const UnownedTag: unique symbol = Symbol.for("alchemy/Unowned");
+const UnownedTag: unique symbol = Symbol("alchemy/Unowned");
 
 /**
  * Brand a `read` return value as belonging to a different owner.
@@ -110,11 +116,15 @@ export const Unowned: {
 /**
  * Strip the {@link Unowned} brand from an attributes object before persisting
  * it — state should not carry per-deploy ownership-routing metadata.
+ *
+ * The brand is intentionally non-enumerable, so a plain spread already
+ * drops it; the additional `delete` is defense-in-depth in case a future
+ * change makes the descriptor enumerable. Always returns a fresh object
+ * (never mutates the input).
  */
 export const stripUnowned = <T extends object>(attrs: T): T => {
-  if (!Unowned.is(attrs)) return attrs;
   const out: any = { ...attrs };
-  delete out[UnownedTag];
+  if (UnownedTag in out) delete out[UnownedTag];
   return out;
 };
 

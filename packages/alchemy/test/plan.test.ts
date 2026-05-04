@@ -2496,8 +2496,17 @@ describe("engine-level adoption", () => {
         fqn: "Adopted",
       });
       expect(persisted?.status).toBe("created");
-      // The Unowned brand should be stripped before persisting.
-      expect(Unowned.is(persisted?.attr ?? {})).toBe(false);
+
+      // The Unowned brand must be fully scrubbed from anything that
+      // reaches the state store — both via the public `Unowned.is`
+      // check *and* via direct symbol inspection (in case someone
+      // accidentally uses `Symbol.for` rather than `Unowned.is`).
+      const persistedAttr = persisted?.attr as object;
+      expect(Unowned.is(persistedAttr)).toBe(false);
+      expect(
+        Object.getOwnPropertySymbols(persistedAttr).length,
+      ).toBe(0);
+      expect(JSON.stringify(persistedAttr)).not.toContain("Unowned");
     }),
   );
 
