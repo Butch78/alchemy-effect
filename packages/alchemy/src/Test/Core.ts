@@ -1,7 +1,6 @@
 import { ConfigProvider } from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
@@ -12,7 +11,7 @@ import { apply } from "../Apply.ts";
 import { provideFreshArtifactStore } from "../Artifacts.ts";
 import { AuthProviders } from "../Auth/AuthProvider.ts";
 import { withProfileOverride } from "../Auth/Profile.ts";
-import { LoggingCli } from "../Cli/LoggingCli.ts";
+import { TestCli } from "./TestCli.ts";
 import { deploy as _deploy } from "../Deploy.ts";
 import { destroy as _destroy } from "../Destroy.ts";
 import type { Input } from "../Input.ts";
@@ -54,11 +53,7 @@ export type TestEffect<A, Req = never> = StackEffect<A, any, Req>;
 
 const platformLayer = Layer.mergeAll(PlatformServices, FetchHttpClient.layer);
 
-const alchemyLayer = Layer.mergeAll(
-  LoggingCli,
-  Logger.layer([Logger.consolePretty()], { mergeWithExisting: true }),
-  AlchemyContextLive,
-);
+const alchemyLayer = Layer.mergeAll(TestCli, AlchemyContextLive);
 
 /**
  * Build the per-test runtime and return a self-contained Effect.
