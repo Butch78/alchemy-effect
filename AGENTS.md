@@ -654,6 +654,19 @@ Dashboard groups projects by kind from these spans (Axiom can't APL-query metric
   1. Mark the PR as **draft**.
   2. Tell the user (in the chat that initiated the PR creation) what is outstanding.
 
+:::warning
+**Markdown content must reach GitHub verbatim** — un-escaped backticks, fenced code blocks, etc. The reliable shape is to write the description to a file and pass `--body-file <path>` to `gh pr create` / `gh pr edit`:
+
+```sh
+# write the body to a temp file (use Write tool, not echo/cat heredoc)
+gh pr edit 179 --body-file /tmp/pr-body.md
+```
+
+Do **not** inline the body via `--body "$(cat <<'EOF' ... EOF)"`. Even with a single-quoted heredoc some shells / `gh` versions still mangle backticks and backslashes; the resulting PR body ends up with literal `\`` sequences instead of inline code spans. `--body-file` sidesteps shell quoting entirely.
+
+If you need to update an already-created PR's body, prefer `gh pr edit --body-file ...`. If that silently no-ops (older `gh` versions), fall back to `gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -F body=@/tmp/pr-body.md`.
+:::
+
 The summary goes at the very top of the description as plain prose — NO heading above it, no `### Summary`, nothing. The PR title already serves as the title; do not repeat or re-title it. Only add `###` subheadings further down if the description genuinely has multiple sections worth separating.
 
 Example PR description (good):
