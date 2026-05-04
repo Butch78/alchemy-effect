@@ -1,6 +1,6 @@
 import * as Cloudflare from "alchemy/Cloudflare";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import IndexDO, { INDEX_DO_NAME } from "./IndexDO.ts";
 import {
   eventKey,
   fingerprint,
@@ -12,6 +12,7 @@ import type {
   Issue,
   IssueStatus,
   ProjectMeta,
+  ProjectListEntry,
   ProjectSummary,
   RawEvent,
   TriageDecision,
@@ -22,19 +23,33 @@ import type {
  * the entire history for that project — raw events, rolling counters, the
  * per-project issue catalog, and the latest AI summary.
  *
- * Storage layout (all KV, no SQL — see comment in handler.ts for rationale):
+ * Data flow is strictly left-to-right:
+ *
+ * ```text
+ *   handler ──recordBatch──▶ ProjectDO ──pushToIndex──▶ IndexDO
+ * ```
+ *
+ * Per batch (`recordBatch`):
+ *   1. Append every raw event to the event log.
+ *   2. Bump per-resource and per-error counters.
+ *   3. Classify each error (Workers AI) and upsert an Issue per fingerprint.
+ *   4. Re-run the project summarizer (Workers AI) over the fresh counters.
+ *   5. Push `(project meta, issues)` into the IndexDO so cross-project
+ *      listings stay current. The push happens from inside the DO — the
+ *      handler never talks to IndexDO directly.
+ *
+ * Storage layout (all KV, no SQL):
  *
  * ```text
  * meta                           → ProjectMeta
- * dirty                          → 1 (set on every event, cleared on summarize)
  *
  * event:<reverseTs>:<rand>       → RawEvent     (forever, ordered newest→oldest)
  *
- * count:resource:_total          → number       (sum of all resource ops)
+ * count:resource:_total          → number
  * count:resource:<resource_type> → number
  * count:error:_total             → number
- * count:error:<errorType>        → number       (also stores `__sample__:msg`)
- * sample:error:<errorType>       → string       (latest message for the type)
+ * count:error:<errorType>        → number
+ * sample:error:<errorType>       → string       (latest message for that type)
  *
  * issue:<fingerprint>            → Issue
  * issue_idx:<sevDesc>:<reverseLastSeen>:<fingerprint> → ""
@@ -42,33 +57,22 @@ import type {
  * summary:current                → ProjectSummary
  * summary:<reverseTs>            → ProjectSummary  (history)
  * ```
- *
- * The DO sets a 5-minute alarm whenever `dirty` flips on. The alarm runs
- * the AI summarizer and clears the flag. This batches AI calls so a burst
- * of 1000 events still costs 1 summary, not 1000.
  */
 
-/** How long after a write to wait before re-running the AI summarizer. */
-const SUMMARY_ALARM_MS = Duration.toMillis(Duration.minutes(5));
-
-/** How many recent events to read into the summarizer prompt. */
+/** How many recent events to feed into the summarizer prompt. */
 const SUMMARIZE_RECENT_EVENTS = 25;
 
-const MIN_RESOURCE_TOPN = 20;
-const MIN_ERROR_TOPN = 20;
+const MAX_RESOURCE_TOPN = 20;
+const MAX_ERROR_TOPN = 20;
 
-/**
- * Per-call options. The model can be overridden at the call site so the
- * stack can mix a cheap classifier with a beefier summarizer if it wants.
- */
-export interface RecordEventOptions {
-  /** Model used for classification. */
-  classifyModel?: string;
-  /** Skip Discord notification for this issue (handler decides). */
-  suppressDiscord?: boolean;
+export interface RecordBatchOptions {
+  /** Workers AI model used for both classification and summarization. */
+  model?: string;
+  /** Skip running the summarizer at the end of the batch. Default: false. */
+  skipSummarize?: boolean;
 }
 
-export interface RecordEventResult {
+export interface BatchedIssueResult {
   fingerprint: string;
   decision: TriageDecision;
   issue: Issue;
@@ -76,15 +80,23 @@ export interface RecordEventResult {
   isNew: boolean;
 }
 
+export interface RecordBatchResult {
+  meta: ProjectMeta;
+  issues: ReadonlyArray<BatchedIssueResult>;
+  summary: ProjectSummary | null;
+}
+
 export default class ProjectDO extends Cloudflare.DurableObjectNamespace<ProjectDO>()(
   "ProjectDO",
   Effect.gen(function* () {
-    // Outer scope: bind shared services that all instances reuse.
+    // Outer scope: bind shared services that all DO instances reuse.
     const ai = yield* Cloudflare.AI.bind();
+    const indexNs = yield* IndexDO;
 
     return Effect.gen(function* () {
       const state = yield* Cloudflare.DurableObjectState;
       const storage = state.storage;
+      const indexStub = indexNs.getByName(INDEX_DO_NAME);
 
       const getMeta = Effect.gen(function* () {
         return yield* storage.get<ProjectMeta>("meta");
@@ -121,17 +133,10 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
           return fresh;
         });
 
-      const armSummarizer = Effect.gen(function* () {
-        const existing = yield* storage.getAlarm();
-        if (existing != null) return;
-        yield* storage.setAlarm(Date.now() + SUMMARY_ALARM_MS);
-      });
-
       const recordRaw = (event: RawEvent) =>
         Effect.gen(function* () {
-          const tieBreak =
-            // Adequate for tie-breaking inside a 1ms bucket; not crypto.
-            Math.random().toString(36).slice(2, 10);
+          // Adequate for tie-breaking inside a 1ms bucket; not crypto.
+          const tieBreak = Math.random().toString(36).slice(2, 10);
           yield* storage.put(eventKey(event.timestamp, tieBreak), event);
         });
 
@@ -142,13 +147,14 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
           yield* incrCounter(`count:resource:${event.resourceType}`);
         });
 
+      const isErrorEvent = (event: RawEvent): boolean =>
+        event.status === "error" ||
+        !!event.errorType ||
+        /\b(error|fail|panic|exception)\b/i.test(event.message);
+
       const recordErrorCounts = (event: RawEvent) =>
         Effect.gen(function* () {
-          const isError =
-            event.status === "error" ||
-            !!event.errorType ||
-            /\b(error|fail|panic|exception)\b/i.test(event.message);
-          if (!isError) return false;
+          if (!isErrorEvent(event)) return false;
           const type = event.errorType ?? "Error";
           yield* incrCounter("count:error:_total");
           yield* incrCounter(`count:error:${type}`);
@@ -199,8 +205,6 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
                 prUrl: null,
                 discordMessageId: null,
               };
-          // Replace the secondary index entry on every update so the most
-          // recent activity surfaces to the top of the list.
           if (existing) {
             yield* storage.delete(
               issueIndexKey(existing.severity, existing.lastSeen, id),
@@ -213,56 +217,140 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
           return { issue, isNew: !existing };
         });
 
+      const recordOne = (event: RawEvent, model: string | undefined) =>
+        Effect.gen(function* () {
+          const meta = yield* ensureMeta(event);
+          yield* recordRaw(event);
+          yield* recordResourceCounts(event);
+          const wasError = yield* recordErrorCounts(event);
+          const decision = wasError
+            ? yield* classifyEvent(ai, event, model)
+            : decisionFromEvent(event);
+          const { issue, isNew } = yield* upsertIssue(event, decision);
+          const updatedMeta: ProjectMeta = {
+            ...meta,
+            lastSeen: Math.max(meta.lastSeen, event.timestamp),
+            firstSeen: Math.min(meta.firstSeen, event.timestamp),
+            eventCount: meta.eventCount + 1,
+            errorCount: meta.errorCount + (wasError ? 1 : 0),
+            resourceOpCount:
+              meta.resourceOpCount + (event.resourceType ? 1 : 0),
+            userId: meta.userId ?? event.userId ?? null,
+            gitOriginHash: meta.gitOriginHash ?? event.gitOriginHash ?? null,
+            gitBranchHash: meta.gitBranchHash ?? event.gitBranchHash ?? null,
+            alchemyVersion:
+              meta.alchemyVersion ?? event.alchemyVersion ?? null,
+            dirty: true,
+          };
+          yield* putMeta(updatedMeta);
+          return {
+            fingerprint: issue.id,
+            decision,
+            issue,
+            isNew,
+          } satisfies BatchedIssueResult;
+        });
+
+      // -------------------------------------------------------------------
+      // pushToIndex — runs at the tail of every batch. Sends the project's
+      // meta + the full top-issue list to IndexDO so the aggregator's view
+      // is always derived from this DO's view.
+      // -------------------------------------------------------------------
+
+      const pushToIndex = (
+        meta: ProjectMeta,
+        topIssues: ReadonlyArray<Issue>,
+        summary: ProjectSummary | null,
+      ) =>
+        Effect.gen(function* () {
+          const entry: ProjectListEntry = {
+            projectId: meta.projectId,
+            userId: meta.userId,
+            gitOriginHash: meta.gitOriginHash,
+            alchemyVersion: meta.alchemyVersion,
+            eventCount: meta.eventCount,
+            errorCount: meta.errorCount,
+            lastSeen: meta.lastSeen,
+            hasSummary: summary != null || meta.lastAnalyzed != null,
+          };
+          yield* indexStub.recordProject(entry);
+          for (const issue of topIssues) {
+            yield* indexStub.recordIssue({
+              projectId: issue.projectId,
+              fingerprint: issue.id,
+              title: issue.title,
+              severity: issue.severity,
+              status: issue.status,
+              occurrences: issue.occurrences,
+              lastSeen: issue.lastSeen,
+            });
+          }
+        }).pipe(Effect.catch(() => Effect.void));
+
+      const readTopIssues = (limit: number) =>
+        Effect.gen(function* () {
+          const ids = yield* storage.list<string>({
+            prefix: "issue_idx:",
+            limit,
+          });
+          const issues: Issue[] = [];
+          for (const key of ids.keys()) {
+            const fp = key.split(":").pop();
+            if (!fp) continue;
+            const issue = yield* storage.get<Issue>(`issue:${fp}`);
+            if (issue) issues.push(issue);
+          }
+          return issues;
+        });
+
       // -------------------------------------------------------------------
       // public RPC
       // -------------------------------------------------------------------
 
       return {
-        recordEvent: (
-          event: RawEvent,
-          options: RecordEventOptions = {},
-        ): Effect.Effect<RecordEventResult, never, Cloudflare.WorkerEnvironment> =>
+        /**
+         * Process a batch of events for this project: write them, refresh
+         * the AI summary, and push the result to IndexDO. This is the only
+         * write entry point — the handler always calls this, never the
+         * single-event variant.
+         */
+        recordBatch: (
+          events: ReadonlyArray<RawEvent>,
+          options: RecordBatchOptions = {},
+        ): Effect.Effect<RecordBatchResult, never, Cloudflare.WorkerEnvironment> =>
           Effect.gen(function* () {
-            const meta = yield* ensureMeta(event);
-            yield* recordRaw(event);
-            yield* recordResourceCounts(event);
-            const wasError = yield* recordErrorCounts(event);
-            const decision = wasError
-              ? yield* classifyEvent(ai, event, options.classifyModel)
-              : decisionFromEvent(event);
-            const { issue, isNew } = yield* upsertIssue(event, decision);
-            const updatedMeta: ProjectMeta = {
-              ...meta,
-              lastSeen: Math.max(meta.lastSeen, event.timestamp),
-              firstSeen: Math.min(meta.firstSeen, event.timestamp),
-              eventCount: meta.eventCount + 1,
-              errorCount: meta.errorCount + (wasError ? 1 : 0),
-              resourceOpCount:
-                meta.resourceOpCount + (event.resourceType ? 1 : 0),
-              dirty: true,
-              userId: meta.userId ?? event.userId ?? null,
-              gitOriginHash:
-                meta.gitOriginHash ?? event.gitOriginHash ?? null,
-              gitBranchHash:
-                meta.gitBranchHash ?? event.gitBranchHash ?? null,
-              alchemyVersion:
-                meta.alchemyVersion ?? event.alchemyVersion ?? null,
-            };
-            yield* putMeta(updatedMeta);
-            yield* armSummarizer;
+            const issues: BatchedIssueResult[] = [];
+            for (const event of events) {
+              issues.push(yield* recordOne(event, options.model));
+            }
+            const summary = options.skipSummarize
+              ? null
+              : yield* runSummarize(ai, storage, options.model ?? DEFAULT_MODEL);
+            const meta = (yield* getMeta) ?? null;
+            if (meta) {
+              const topIssues = yield* readTopIssues(50);
+              yield* pushToIndex(meta, topIssues, summary);
+            }
             return {
-              fingerprint: issue.id,
-              decision,
-              issue,
-              isNew,
+              meta: meta!,
+              issues,
+              summary,
             };
           }),
 
         getMeta: () => getMeta,
 
-        /** Force-run the summarizer now and return the result. */
+        /** Force-run the summarizer now (also pushes to IndexDO). */
         summarizeNow: (model: string = DEFAULT_MODEL) =>
-          runSummarize(ai, storage, model),
+          Effect.gen(function* () {
+            const summary = yield* runSummarize(ai, storage, model);
+            const meta = yield* getMeta;
+            if (meta) {
+              const topIssues = yield* readTopIssues(50);
+              yield* pushToIndex(meta, topIssues, summary);
+            }
+            return summary;
+          }),
 
         getSummary: () =>
           Effect.gen(function* () {
@@ -274,7 +362,7 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
             const limit = options.limit ?? 50;
             const ids = yield* storage.list<string>({
               prefix: "issue_idx:",
-              limit: limit * 2, // overscan in case of status filter
+              limit: limit * 2,
             });
             const issues: Issue[] = [];
             for (const key of ids.keys()) {
@@ -320,7 +408,6 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
             return next;
           }),
 
-        /** Read raw events newest-first. */
         listEvents: (limit = 100) =>
           Effect.gen(function* () {
             const entries = yield* storage.list<RawEvent>({
@@ -328,14 +415,6 @@ export default class ProjectDO extends Cloudflare.DurableObjectNamespace<Project
               limit,
             });
             return [...entries.values()];
-          }),
-
-        // alarm — Cloudflare runtime hook. Effect-shaped.
-        alarm: () =>
-          Effect.gen(function* () {
-            const meta = yield* getMeta;
-            if (!meta?.dirty) return;
-            yield* runSummarize(ai, storage, DEFAULT_MODEL);
           }),
       };
     });
@@ -406,7 +485,7 @@ const readTopResources = (storage: Cloudflare.DurableObjectStorage) =>
       tallies.push({ type, count });
     }
     tallies.sort((a, b) => b.count - a.count);
-    return tallies.slice(0, MIN_RESOURCE_TOPN);
+    return tallies.slice(0, MAX_RESOURCE_TOPN);
   });
 
 const readTopErrors = (storage: Cloudflare.DurableObjectStorage) =>
@@ -419,7 +498,7 @@ const readTopErrors = (storage: Cloudflare.DurableObjectStorage) =>
       tallies.push({ type, count });
     }
     tallies.sort((a, b) => b.count - a.count);
-    const trimmed = tallies.slice(0, MIN_ERROR_TOPN);
+    const trimmed = tallies.slice(0, MAX_ERROR_TOPN);
     for (const t of trimmed) {
       const sample = yield* storage.get<string>(`sample:error:${t.type}`);
       if (sample) t.sample = sample;

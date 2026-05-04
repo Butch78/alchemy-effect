@@ -5,12 +5,10 @@ import * as Effect from "effect/Effect";
 import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import IndexDO, { INDEX_DO_NAME } from "./IndexDO.ts";
-import ProjectDO from "./ProjectDO.ts";
+import ProjectDO, { type BatchedIssueResult } from "./ProjectDO.ts";
 import type {
   Issue,
   IssueStatus,
-  ProjectListEntry,
-  ProjectMeta,
   ProjectSummary,
   RawEvent,
   TriageDecision,
@@ -76,13 +74,19 @@ const requireAuth = (expected: string | undefined) =>
  * ) {}
  * ```
  *
- * Storage architecture: every event is sharded into a per-project Durable
- * Object addressed by `alchemy.git.root_commit` (the canonical project id
- * emitted by `packages/alchemy/src/Telemetry/Attributes.ts`). The DO holds
- * the raw event log, rolling counters, the per-project issue catalog, and
- * the latest AI summary. A single `IndexDO` mirrors a sortable list of
- * projects + a sortable list of top issues so cross-project endpoints
- * don't have to fan out.
+ * Data flow is strictly left-to-right:
+ *
+ * ```text
+ *   Axiom ──▶ handler ──recordBatch──▶ ProjectDO ──pushToIndex──▶ IndexDO
+ *                                       (per project)              (single)
+ * ```
+ *
+ * The handler shards the incoming batch by `alchemy.git.root_commit`
+ * (the project id emitted by `packages/alchemy/src/Telemetry/Attributes.ts`)
+ * and calls `recordBatch` exactly once per project. The ProjectDO writes
+ * its own raw events, refreshes its own AI summary + issue list, and then
+ * pushes both to the IndexDO. The handler never talks to the IndexDO
+ * directly — that's the ProjectDO's job.
  *
  * Routes:
  *
@@ -177,46 +181,40 @@ export const handler = (options: HandlerOptions = {}) =>
         }
       }).pipe(Effect.catch(() => Effect.void));
 
-    const triageOne = (rawEvent: RawEvent) =>
+    const triageProjectBatch = (
+      projectId: string,
+      events: ReadonlyArray<RawEvent>,
+    ) =>
       Effect.gen(function* () {
-        const projectId = rawEvent.projectId ?? unknownProjectId;
-        const event: RawEvent = { ...rawEvent, projectId };
         const stub = projectStub(projectId);
+        const result = yield* stub.recordBatch(events, { model });
 
-        const result = yield* stub.recordEvent(event, {
-          classifyModel: model,
-        });
-
-        // Mirror project + (if it's an issue) issue into the cross-project
-        // IndexDO. Fire-and-forget — the source of truth is the ProjectDO.
-        yield* Effect.forkChild(
-          Effect.gen(function* () {
-            const meta = yield* stub.getMeta();
-            if (!meta) return;
-            yield* indexStub.recordProject(toListEntry(meta));
-            yield* indexStub.recordIssue({
-              projectId,
-              fingerprint: result.issue.id,
-              title: result.issue.title,
-              severity: result.issue.severity,
-              status: result.issue.status,
-              occurrences: result.issue.occurrences,
-              lastSeen: result.issue.lastSeen,
-            });
-          }),
-        );
-
-        if (result.isNew) {
-          yield* Effect.forkChild(
-            postToDiscord(result.issue, result.decision),
-          );
+        // Discord — fire-and-forget. Only ping on the first occurrence of
+        // a fingerprint to avoid spam.
+        for (const issue of result.issues) {
+          if (issue.isNew) {
+            yield* Effect.forkChild(
+              postToDiscord(issue.issue, issue.decision),
+            );
+          }
         }
 
         return {
           projectId,
-          fingerprint: result.fingerprint,
-          decision: result.decision,
-          occurrences: result.issue.occurrences,
+          eventCount: events.length,
+          issues: result.issues.map((i: BatchedIssueResult) => ({
+            fingerprint: i.fingerprint,
+            isNew: i.isNew,
+            severity: i.decision.severity,
+            occurrences: i.issue.occurrences,
+          })),
+          summary: result.summary
+            ? {
+                resourcesSummary: result.summary.resourcesSummary,
+                errorsSummary: result.summary.errorsSummary,
+                generatedAt: result.summary.generatedAt,
+              }
+            : null,
         };
       });
 
@@ -241,13 +239,21 @@ export const handler = (options: HandlerOptions = {}) =>
                 { status: 200 },
               );
             }
-            const results = yield* Effect.forEach(body.events, triageOne, {
-              concurrency: 4,
-            });
+            // Group by projectId, then send each project's slice as one
+            // batch. Each ProjectDO runs the AI summarizer once per batch
+            // — bounding AI cost to O(distinct projects per webhook).
+            const groups = groupByProject(body.events, unknownProjectId);
+            const projectResults = yield* Effect.forEach(
+              [...groups.entries()],
+              ([projectId, events]) =>
+                triageProjectBatch(projectId, events),
+              { concurrency: 4 },
+            );
             return yield* HttpServerResponse.json({
               ok: true,
-              triaged: results.length,
-              results,
+              projects: projectResults.length,
+              triaged: body.events.length,
+              results: projectResults,
             });
           });
           return yield* Effect.catchTag(inner, "Unauthorized", () =>
@@ -361,16 +367,23 @@ const clampLimit = (raw: string | null, def = 50, max = 200): number => {
   return Math.min(max, Math.max(1, Math.floor(n)));
 };
 
-const toListEntry = (meta: ProjectMeta): ProjectListEntry => ({
-  projectId: meta.projectId,
-  userId: meta.userId,
-  gitOriginHash: meta.gitOriginHash,
-  alchemyVersion: meta.alchemyVersion,
-  eventCount: meta.eventCount,
-  errorCount: meta.errorCount,
-  lastSeen: meta.lastSeen,
-  hasSummary: meta.lastAnalyzed != null,
-});
+const groupByProject = (
+  events: ReadonlyArray<RawEvent>,
+  fallbackProjectId: string,
+): Map<string, RawEvent[]> => {
+  const groups = new Map<string, RawEvent[]>();
+  for (const raw of events) {
+    const projectId = raw.projectId ?? fallbackProjectId;
+    const event: RawEvent = raw.projectId ? raw : { ...raw, projectId };
+    let bucket = groups.get(projectId);
+    if (!bucket) {
+      bucket = [];
+      groups.set(projectId, bucket);
+    }
+    bucket.push(event);
+  }
+  return groups;
+};
 
 interface WebhookPayload {
   events: RawEvent[];
