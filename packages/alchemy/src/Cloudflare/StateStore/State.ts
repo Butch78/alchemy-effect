@@ -110,7 +110,7 @@ export const bootstrap = (options: BootstrapOptions = {}) =>
         `Worker '${scriptName}' already exists; adopting and refreshing credentials. ` +
           `Use --force to redeploy.`,
       );
-      const credentials = yield* loginWithCloudflare();
+      const credentials = yield* loginWithCloudflare(scriptName);
       if (!isCI) {
         yield* writeCredentials<HttpStateStoreCredentials>(
           profileName,
@@ -231,7 +231,7 @@ export const state = (props?: {
 
       if (workerExists) {
         // it exists, so fetch the secret token
-        const credentials = yield* loginWithCloudflare();
+        const credentials = yield* loginWithCloudflare(scriptName);
         if (!isCI) {
           yield* writeCredentials<HttpStateStoreCredentials>(
             profileName,
@@ -370,7 +370,7 @@ const finishBootstrap = ({
     // actually deployed. `loginWithCloudflare` also persists the
     // credentials file (skipping the write in CI), so we don't need
     // to do that explicitly here.
-    const { url, authToken } = yield* loginWithCloudflare();
+    const { url, authToken } = yield* loginWithCloudflare(scriptName);
     const httpState = yield* makeCloudflareStateStore({ url, authToken });
     // `profileName` is intentionally unused here — `loginWithCloudflare`
     // resolves it itself. Reference it to keep the surrounding API
@@ -411,7 +411,7 @@ const deployStateStore = (scriptName: string, state?: StateService) =>
         },
         Effect.gen(function* () {
           const token = yield* TokenValue;
-          const api = yield* Api;
+          const api = yield* Api(scriptName);
 
           // Surface the bearer token so tests and clients can authenticate
           // after deploy. The underlying value lives in the Cloudflare
@@ -449,9 +449,8 @@ const deployStateStore = (scriptName: string, state?: StateService) =>
  * 1. Find the single account-wide Secrets Store.
  * 2. Upload a short-lived edge-preview worker that binds the
  *    auth-token secret and returns its value.
- * 3. Derive the state-store worker URL from
- *    {@link STATE_STORE_SCRIPT_NAME} and the account's workers.dev
- *    subdomain.
+ * 3. Derive the state-store worker URL from `scriptName` and the
+ *    account's workers.dev subdomain.
  * 4. Persist `{ url, token }` under the `http-state-store`
  *    credentials file.
  *
@@ -459,7 +458,9 @@ const deployStateStore = (scriptName: string, state?: StateService) =>
  * `CloudflareEnvironment`, `Credentials`, `HttpClient`, and
  * `FileSystem`.
  */
-export const loginWithCloudflare = () =>
+export const loginWithCloudflare = (
+  scriptName: string = STATE_STORE_SCRIPT_NAME,
+) =>
   Effect.gen(function* () {
     const isCI = yield* Config.boolean("CI").pipe(Config.withDefault(false));
     const profileName = yield* ALCHEMY_PROFILE;
@@ -487,14 +488,14 @@ export const loginWithCloudflare = () =>
     //    resolve and Cloudflare's edge serves a 400 HTML error page
     //    instead of routing to the preview.
     const authToken = yield* readSecretViaEdge(
-      STATE_STORE_SCRIPT_NAME,
+      scriptName,
       store.id,
       AuthTokenSecretName,
     );
 
     // 3. Derive the deployed worker URL.
     const { subdomain } = yield* workers.getSubdomain({ accountId });
-    const url = `https://${STATE_STORE_SCRIPT_NAME}.${subdomain}.workers.dev`;
+    const url = `https://${scriptName}.${subdomain}.workers.dev`;
 
     if (!isCI) {
       // 4. Persist credentials. The profile entry is managed by

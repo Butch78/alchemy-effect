@@ -43,11 +43,15 @@ export const STATE_STORE_VERSION = 1 as const;
  *
  * In the bundled case, fall back to the published source file shipped
  * alongside the CLI under `../src/Cloudflare/StateStore/Api.ts`.
+ *
+ * Parameterised on `scriptName` so callers can deploy multiple state
+ * stores per account by overriding the worker name (default
+ * {@link STATE_STORE_SCRIPT_NAME}).
  */
-export default Worker(
+const Api = (scriptName: string = STATE_STORE_SCRIPT_NAME) => Worker(
   "Api",
   {
-    name: STATE_STORE_SCRIPT_NAME,
+    name: scriptName,
     main: import.meta.filename,
     url: true,
     compatibility: {
@@ -161,6 +165,8 @@ export default Worker(
     };
   }).pipe(Effect.provide(Layer.mergeAll(SecretBindingLive))),
 );
+
+export default Api;
 
 /**
  * Stub `HttpPlatform` for the worker. The state-store API never
