@@ -458,6 +458,33 @@ export const BucketProvider = () =>
 
       return {
         stables: ["bucketName", "bucketArn", "region", "accountId"],
+        // S3 bucket names are globally unique. `headBucket` succeeds only when
+        // the bucket exists in our account, so a successful response is itself
+        // proof of account-level ownership — there is no separate ownership
+        // signal to surface as `Unowned`.
+        read: Effect.fn(function* ({ id, olds, output }) {
+          const bucketName =
+            output?.bucketName ?? (yield* createBucketName(id, olds ?? {}));
+          const region = yield* Region;
+          const { accountId } = yield* AWSEnvironment;
+          const exists = yield* s3
+            .headBucket({ Bucket: bucketName })
+            .pipe(
+              Effect.map(() => true),
+              Effect.catchTag("NotFound", () => Effect.succeed(false)),
+              Effect.catch(() => Effect.succeed(false)),
+            );
+          if (!exists) return undefined;
+          return {
+            bucketName,
+            bucketArn: `arn:aws:s3:::${bucketName}` as const,
+            bucketDomainName: `${bucketName}.s3.amazonaws.com` as const,
+            bucketRegionalDomainName:
+              `${bucketName}.s3.${region}.amazonaws.com` as const,
+            region,
+            accountId,
+          };
+        }),
         diff: Effect.fn(function* ({ id, news = {}, olds = {} }) {
           if (!isResolved(news)) return undefined;
           const oldBucketName = yield* createBucketName(id, olds);

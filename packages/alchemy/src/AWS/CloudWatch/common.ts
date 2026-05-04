@@ -1,6 +1,7 @@
 import * as cloudwatch from "@distilled.cloud/aws/cloudwatch";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import {
   createInternalTags,
@@ -45,19 +46,17 @@ export const createManagedTags = Effect.fn(function* (
   };
 });
 
-export const ensureOwnedByAlchemy = Effect.fn(function* (
+/**
+ * Brands the given attrs with {@link Unowned} when the resource's tags don't
+ * match this stack/stage/logical-id. Use at the end of `read` so the engine
+ * can route adoption decisions centrally.
+ */
+export const brandOwnership = Effect.fn(function* <T extends object>(
   id: string,
-  name: string,
+  attrs: T,
   tags: CloudWatchTags,
-  resourceType: string,
 ) {
-  if (!(yield* hasAlchemyTags(id, tags))) {
-    return yield* Effect.fail(
-      new Error(
-        `${resourceType} '${name}' already exists and is not managed by this stack`,
-      ),
-    );
-  }
+  return Unowned.unless(yield* hasAlchemyTags(id, tags), attrs);
 });
 
 export const updateResourceTags = Effect.fn(function* ({

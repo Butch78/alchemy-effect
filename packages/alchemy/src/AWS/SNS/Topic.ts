@@ -1,11 +1,17 @@
 import * as sns from "@distilled.cloud/aws/sns";
 import * as Effect from "effect/Effect";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags, createTagsList, diffTags } from "../../Tags.ts";
+import {
+  createInternalTags,
+  createTagsList,
+  diffTags,
+  hasAlchemyTags,
+} from "../../Tags.ts";
 import type { AccountID } from "../Environment.ts";
 import type { RegionID } from "../Region.ts";
 
@@ -137,11 +143,13 @@ export const TopicProvider = () =>
       const topicName =
         output?.topicName ?? (yield* toTopicName(id, olds ?? {}));
 
-      return yield* readTopic({
+      const state = yield* readTopic({
         id,
         topicArn: output?.topicArn,
         topicName,
       });
+      if (!state) return undefined;
+      return Unowned.unless(yield* hasAlchemyTags(id, state.tags), state);
     }),
     stables: ["topicArn", "topicName", "fifo"],
     diff: Effect.fn(function* ({ id, news = {}, olds = {} }) {
@@ -390,15 +398,13 @@ const readTopic = Effect.fn(function* ({
 
   const topicAttributes = toAttributeMap(attributes.Attributes);
 
+  const apiTags = toTagMap(tags.Tags);
   return {
     topicArn: resolvedTopicArn as TopicArn,
     topicName: topicAttributes.TopicArn?.split(":").at(-1) ?? topicName,
     fifo: topicAttributes.FifoTopic === "true",
     attributes: topicAttributes,
     dataProtectionPolicy,
-    tags: {
-      ...(yield* createInternalTags(id)),
-      ...toTagMap(tags.Tags),
-    },
+    tags: apiTags,
   };
 });

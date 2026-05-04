@@ -11,8 +11,8 @@ import type { Providers } from "../Providers.ts";
 import { AWSEnvironment, type AccountID } from "../Environment.ts";
 import type { RegionID } from "../Region.ts";
 import {
+  brandOwnership,
   createName,
-  ensureOwnedByAlchemy,
   readResourceTags,
   retryConcurrent,
   updateResourceTags,
@@ -183,20 +183,15 @@ export const InsightRuleProvider = () =>
         read: Effect.fn(function* ({ id, olds, output }) {
           const name =
             output?.ruleName ?? (yield* createRuleName(id, olds ?? {}));
-          return yield* readInsightRule(name);
+          const state = yield* readInsightRule(name);
+          if (!state) return undefined;
+          return yield* brandOwnership(id, state, state.tags);
         }),
         create: Effect.fn(function* ({ id, news, session }) {
           const name = yield* createRuleName(id, news);
+          // Engine has cleared us via `read` (foreign-tagged insight rules
+          // are surfaced as `Unowned`). `putInsightRule` is idempotent.
           const existing = yield* readInsightRule(name);
-
-          if (existing) {
-            yield* ensureOwnedByAlchemy(
-              id,
-              name,
-              existing.tags,
-              "insight rule",
-            );
-          }
 
           yield* retryConcurrent(
             cloudwatch.putInsightRule({

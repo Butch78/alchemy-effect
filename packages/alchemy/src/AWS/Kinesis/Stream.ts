@@ -6,6 +6,7 @@ import * as kinesis from "@distilled.cloud/aws/kinesis";
 import type * as lambda from "aws-lambda";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
@@ -380,26 +381,13 @@ const readStream = Effect.fn(function* ({
   });
 });
 
-const resolveOwnedStream = Effect.fn(function* (
-  id: string,
-  streamName: string,
-) {
+const adoptExistingStream = Effect.fn(function* (streamName: string) {
   const state = yield* readStream({ streamName });
-
   if (!state) {
     return yield* Effect.fail(
       new Error(`stream ${streamName} exists but could not be read`),
     );
   }
-
-  if (!(yield* hasAlchemyTags(id, state.tags as Tags))) {
-    return yield* Effect.fail(
-      new Error(
-        `stream ${streamName} already exists but is not owned by this stack`,
-      ),
-    );
-  }
-
   return state;
 });
 
@@ -452,10 +440,15 @@ export const StreamProvider = () =>
         read: Effect.fn(function* ({ id, olds, output }) {
           const streamName =
             output?.streamName ?? (yield* createStreamName(id, olds ?? {}));
-          return yield* readStream({
+          const state = yield* readStream({
             streamName,
             streamArn: output?.streamArn,
           });
+          if (!state) return undefined;
+          return Unowned.unless(
+            yield* hasAlchemyTags(id, state.tags as Tags),
+            state,
+          );
         }),
         diff: Effect.fn(function* ({ id, news = {}, olds = {} }) {
           if (!isResolved(news)) return;
@@ -472,6 +465,9 @@ export const StreamProvider = () =>
           const internalTags = yield* createInternalTags(id);
           const allTags = { ...internalTags, ...news.tags };
 
+          // Engine has cleared us via `read` (foreign-tagged streams are
+          // surfaced as `Unowned`). On a race between read and create,
+          // treat `ResourceInUseException` as adoption.
           yield* kinesis
             .createStream({
               StreamName: streamName,
@@ -484,7 +480,7 @@ export const StreamProvider = () =>
             })
             .pipe(
               Effect.catchTag("ResourceInUseException", () =>
-                resolveOwnedStream(id, streamName).pipe(Effect.asVoid),
+                adoptExistingStream(streamName).pipe(Effect.asVoid),
               ),
               Effect.retry({
                 while: (e: any) => e._tag === "LimitExceededException",

@@ -91,6 +91,8 @@ export const KVNamespaceProvider = () =>
         }),
         create: Effect.fn(function* ({ id, news = {} }) {
           const title = yield* createTitle(id, news.title);
+          // Engine has cleared us via `read`. On a race between read and
+          // create, look up the namespace by title and adopt it.
           const namespace = yield* createNamespace({
             accountId,
             title,

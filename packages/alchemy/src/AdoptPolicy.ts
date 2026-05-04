@@ -94,6 +94,7 @@ const UnownedTag: unique symbol = Symbol("alchemy/Unowned");
 export const Unowned: {
   <T extends object>(attrs: T): T;
   is: (value: unknown) => boolean;
+  unless: <T extends object>(owned: boolean, attrs: T) => T;
 } = Object.assign(
   <T extends object>(attrs: T): T => {
     const cloned = { ...attrs } as T;
@@ -110,6 +111,17 @@ export const Unowned: {
       typeof value === "object" &&
       value !== null &&
       (value as any)[UnownedTag] === true,
+    /**
+     * Convenience: return `attrs` as-is if `owned`, else brand with
+     * {@link Unowned}. Useful at the end of a `read` implementation that
+     * has just performed a tag check:
+     *
+     * ```ts
+     * return Unowned.unless(yield* hasAlchemyTags(id, attrs.tags), attrs);
+     * ```
+     */
+    unless: <T extends object>(owned: boolean, attrs: T): T =>
+      owned ? attrs : Unowned(attrs),
   },
 );
 

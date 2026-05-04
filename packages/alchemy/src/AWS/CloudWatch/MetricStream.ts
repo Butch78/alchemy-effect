@@ -9,8 +9,8 @@ import type { Providers } from "../Providers.ts";
 import { AWSEnvironment, type AccountID } from "../Environment.ts";
 import type { RegionID } from "../Region.ts";
 import {
+  brandOwnership,
   createName,
-  ensureOwnedByAlchemy,
   readResourceTags,
   retryConcurrent,
   updateResourceTags,
@@ -162,20 +162,15 @@ export const MetricStreamProvider = () =>
           const name =
             output?.metricStreamName ??
             (yield* createMetricStreamName(id, olds ?? {}));
-          return yield* readMetricStream(name);
+          const state = yield* readMetricStream(name);
+          if (!state) return undefined;
+          return yield* brandOwnership(id, state, state.tags);
         }),
         create: Effect.fn(function* ({ id, news, session }) {
           const name = yield* createMetricStreamName(id, news);
+          // Engine has cleared us via `read` (foreign-tagged metric streams
+          // are surfaced as `Unowned`). `putMetricStream` is idempotent.
           const existing = yield* readMetricStream(name);
-
-          if (existing) {
-            yield* ensureOwnedByAlchemy(
-              id,
-              name,
-              existing.tags,
-              "metric stream",
-            );
-          }
 
           yield* retryConcurrent(
             cloudwatch.putMetricStream({

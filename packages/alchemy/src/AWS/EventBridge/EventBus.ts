@@ -2,6 +2,7 @@ import { Region } from "@distilled.cloud/aws/Region";
 import * as eventbridge from "@distilled.cloud/aws/eventbridge";
 import * as Effect from "effect/Effect";
 
+import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
@@ -164,11 +165,18 @@ export const EventBusProvider = () =>
             return undefined;
           }
 
-          return {
+          const { Tags } = yield* eventbridge.listTagsForResource({
+            ResourceARN: described.Arn,
+          });
+          const attrs = {
             eventBusName: described.Name,
             eventBusArn: described.Arn as EventBusArn,
             description: described.Description,
           };
+          return Unowned.unless(
+            yield* hasAlchemyTags(id, Tags ?? []),
+            attrs,
+          );
         }),
         create: Effect.fn(function* ({ id, news = {}, session }) {
           const eventBusName = yield* createEventBusName(id, news);
@@ -181,6 +189,9 @@ export const EventBusProvider = () =>
           const eventBusArn =
             `arn:aws:events:${region}:${accountId}:event-bus/${eventBusName}` as const;
 
+          // Engine has cleared us via `read` (foreign-tagged buses are
+          // surfaced as `Unowned`). Treat `ResourceAlreadyExistsException`
+          // on this codepath as a benign race against our own read.
           yield* eventbridge
             .createEventBus({
               Name: eventBusName,
@@ -195,18 +206,7 @@ export const EventBusProvider = () =>
             })
             .pipe(
               Effect.catchTag("ResourceAlreadyExistsException", () =>
-                Effect.gen(function* () {
-                  const { Tags } = yield* eventbridge.listTagsForResource({
-                    ResourceARN: eventBusArn,
-                  });
-                  if (!(yield* hasAlchemyTags(id, Tags ?? []))) {
-                    return yield* Effect.fail(
-                      new eventbridge.ResourceAlreadyExistsException({
-                        message: `Event bus '${eventBusName}' already exists and is not managed by alchemy`,
-                      }),
-                    );
-                  }
-                }),
+                Effect.void,
               ),
             );
 
