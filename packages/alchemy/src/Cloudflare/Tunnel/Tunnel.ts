@@ -148,11 +148,19 @@ export const TunnelProvider = () =>
         originRequest: Tunnel.OriginRequestConfig | undefined,
       ) =>
         Effect.gen(function* () {
-          if (!ingress && !originRequest) return;
+          // Always PUT for `cloudflare`-managed tunnels: the API treats
+          // the configuration as the canonical state, so an unconditional
+          // PUT lets reconcile clear out-of-band drift even when the user
+          // removed every ingress rule. An empty `ingress`/`originRequest`
+          // gets normalised to `undefined` so the request body matches
+          // what `getTunnelCloudflaredConfiguration` will return.
           yield* putConfiguration({
             accountId,
             tunnelId,
-            config: { ingress, originRequest },
+            config: {
+              ingress: ingress && ingress.length > 0 ? ingress : undefined,
+              originRequest,
+            },
           });
         });
 
@@ -211,6 +219,11 @@ export const TunnelProvider = () =>
           // Observe — re-fetch the cached tunnel; fall back to a name
           // lookup so we recover from out-of-band deletes or partial
           // state-persistence failures.
+          //
+          // Scope the catch to `TunnelNotFound` only. A blanket catch
+          // would silently treat auth/throttling/5xx failures as "tunnel
+          // missing" and drop us straight into a re-create — masking
+          // real failures and risking duplicate tunnels.
           let observed:
             | {
                 id?: string | null;
@@ -224,15 +237,30 @@ export const TunnelProvider = () =>
             observed = yield* getTunnel({
               accountId: acct,
               tunnelId: output.tunnelId,
-            }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            }).pipe(
+              Effect.map(
+                (t) => t as typeof observed,
+              ),
+              Effect.catchTag("TunnelNotFound", () =>
+                Effect.succeed(undefined),
+              ),
+            );
+            // A tunnel may also surface from `getTunnel` with a non-null
+            // `deletedAt` (Cloudflare retains the record briefly after
+            // deletion). Treat that as "missing" so reconcile re-creates.
+            if (observed?.deletedAt) {
+              observed = undefined;
+            }
           }
           if (!observed) {
             observed = yield* findTunnelByName(name);
           }
 
           // Ensure — create if missing. Cloudflare rejects a duplicate
-          // name with a generic error; tolerate by adopting the
-          // existing tunnel when the caller opted into adoption.
+          // name with `DuplicateTunnelName`; recover by re-listing and
+          // adopting the existing tunnel when the caller opted in.
+          // All other create errors must surface so transient
+          // auth/throttling/5xx don't masquerade as "name conflict".
           if (!observed || !observed.id) {
             observed = yield* createTunnel({
               accountId: acct,
@@ -240,8 +268,11 @@ export const TunnelProvider = () =>
               configSrc,
               tunnelSecret,
             }).pipe(
-              Effect.catch((err) =>
+              Effect.catchTag("DuplicateTunnelName", (err) =>
                 Effect.gen(function* () {
+                  // A duplicate-name response without `adopt` is a hard
+                  // failure: refusing here prevents accidental
+                  // takeover of a foreign tunnel.
                   if (!news.adopt) return yield* Effect.fail(err);
                   const existing = yield* findTunnelByName(name);
                   if (!existing || !existing.id) {
@@ -282,48 +313,89 @@ export const TunnelProvider = () =>
           };
         }),
         delete: Effect.fn(function* ({ output }) {
+          // Idempotent destroy: a previously-deleted tunnel must not
+          // surface as a hard error. Distilled's spec for
+          // `deleteTunnelCloudflared` declares no domain errors, so a
+          // 404/`code: 1002` lands in `UnknownCloudflareError` instead
+          // of a typed `TunnelNotFound`. Filter on `code === 1002` so
+          // we only swallow the not-found race; auth/throttling/5xx
+          // (and the "tunnel has active connections" failure) still
+          // bubble up for the engine to retry.
           yield* deleteTunnel({
             accountId: output.accountId,
             tunnelId: output.tunnelId,
-          }).pipe(Effect.catch(() => Effect.void));
+          }).pipe(
+            Effect.catchTag("UnknownCloudflareError", (err) =>
+              err.code === 1002 ? Effect.void : Effect.fail(err),
+            ),
+          );
         }),
         read: Effect.fn(function* ({ id, output, olds }) {
+          // Helper — load a token only when the tunnel itself was
+          // observed live. Scope the token catch to `TunnelTokenNotFound`
+          // (the only API-named error this op exposes besides the
+          // shared transport ones) so auth/throttling failures surface
+          // to the caller instead of pretending the tunnel doesn't
+          // exist.
+          const loadToken = (acct: string, tunnelId: string) =>
+            getToken({ accountId: acct, tunnelId }).pipe(
+              Effect.map(
+                (t): Redacted.Redacted<string> | undefined =>
+                  Redacted.make(t),
+              ),
+              Effect.catchTag("TunnelTokenNotFound", () =>
+                Effect.succeed(undefined as Redacted.Redacted<string> | undefined),
+              ),
+            );
+
           if (output?.tunnelId) {
-            return yield* getTunnel({
+            const tunnel = yield* getTunnel({
               accountId: output.accountId,
               tunnelId: output.tunnelId,
             }).pipe(
-              Effect.flatMap((t) =>
-                getToken({
-                  accountId: output.accountId,
-                  tunnelId: output.tunnelId,
-                }).pipe(
-                  Effect.map((token) => ({
-                    tunnelId: t.id ?? output.tunnelId,
-                    tunnelName: t.name ?? output.tunnelName,
-                    accountTag: t.accountTag ?? output.accountTag,
-                    accountId: output.accountId,
-                    createdAt: t.createdAt ?? output.createdAt,
-                    deletedAt: t.deletedAt ?? output.deletedAt,
-                    configSrc: ((
-                      t as { configSrc?: "cloudflare" | "local" | null }
-                    ).configSrc ??
-                      output.configSrc ??
-                      "cloudflare") as "cloudflare" | "local",
-                    token: Redacted.make(token),
-                  })),
-                ),
+              Effect.map(
+                (t) =>
+                  t as {
+                    id?: string | null;
+                    name?: string | null;
+                    accountTag?: string | null;
+                    createdAt?: string | null;
+                    deletedAt?: string | null;
+                    configSrc?: "cloudflare" | "local" | null;
+                  },
               ),
-              Effect.catch(() => Effect.succeed(undefined)),
+              Effect.catchTag("TunnelNotFound", () =>
+                Effect.succeed(undefined),
+              ),
             );
+            // Treat both "missing" and "soft-deleted" as gone so the
+            // engine triggers re-create on the next reconcile.
+            if (!tunnel || tunnel.deletedAt) return undefined;
+            const token = yield* loadToken(
+              output.accountId,
+              output.tunnelId,
+            );
+            if (token === undefined) return undefined;
+            return {
+              tunnelId: tunnel.id ?? output.tunnelId,
+              tunnelName: tunnel.name ?? output.tunnelName,
+              accountTag: tunnel.accountTag ?? output.accountTag,
+              accountId: output.accountId,
+              createdAt: tunnel.createdAt ?? output.createdAt,
+              deletedAt: tunnel.deletedAt ?? output.deletedAt,
+              configSrc: (tunnel.configSrc ??
+                output.configSrc ??
+                "cloudflare") as "cloudflare" | "local",
+              token,
+            };
           }
           const name = yield* createTunnelName(id, olds?.name);
           const existing = yield* findTunnelByName(name);
-          if (!existing || !existing.id) return undefined;
-          const token = yield* getToken({
-            accountId,
-            tunnelId: existing.id,
-          });
+          if (!existing || !existing.id || existing.deletedAt) {
+            return undefined;
+          }
+          const token = yield* loadToken(accountId, existing.id);
+          if (token === undefined) return undefined;
           return {
             tunnelId: existing.id,
             tunnelName: existing.name ?? name,
@@ -334,7 +406,7 @@ export const TunnelProvider = () =>
             configSrc: ((
               existing as { configSrc?: "cloudflare" | "local" | null }
             ).configSrc ?? "cloudflare") as "cloudflare" | "local",
-            token: Redacted.make(token),
+            token,
           };
         }),
       };
