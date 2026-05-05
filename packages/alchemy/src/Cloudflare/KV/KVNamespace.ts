@@ -151,6 +151,17 @@ export const KVNamespaceProvider = () =>
           // Sync — KV's only mutable property is the title. Rename only
           // when the observed title drifts from desired so we avoid
           // unnecessary API calls on every reconcile.
+          //
+          // Two races are tolerated on the rename hop:
+          //   * `NamespaceNotFound` — the namespace was deleted between
+          //     observe and update. Recurse via reconcile rather than
+          //     leaving the engine with stale state pointing at a dead
+          //     namespace; the next call observes "missing" and creates
+          //     fresh.
+          //   * `NamespaceTitleAlreadyExists` — a parallel deploy or
+          //     dashboard rename took the desired title first. Re-find
+          //     the namespace by title and adopt; if it's not actually
+          //     there, surface the original error so it isn't masked.
           let namespaceId = observed.id;
           let resolvedTitle = observed.title;
           let supportsUrlEncoding = observed.supportsUrlEncoding ?? undefined;
@@ -159,7 +170,30 @@ export const KVNamespaceProvider = () =>
               accountId: acct,
               namespaceId: observed.id,
               title,
-            });
+            }).pipe(
+              Effect.catchTag("NamespaceNotFound", () =>
+                createNamespace({ accountId: acct, title }).pipe(
+                  Effect.catchTag("NamespaceTitleAlreadyExists", () =>
+                    Effect.gen(function* () {
+                      const match = yield* findNamespaceByTitle(title);
+                      if (match) return match;
+                      return yield* Effect.die(
+                        `Namespace with title "${title}" already exists but could not be found`,
+                      );
+                    }),
+                  ),
+                ),
+              ),
+              Effect.catchTag("NamespaceTitleAlreadyExists", () =>
+                Effect.gen(function* () {
+                  const match = yield* findNamespaceByTitle(title);
+                  if (match) return match;
+                  return yield* Effect.die(
+                    `Namespace with title "${title}" already exists but could not be found`,
+                  );
+                }),
+              ),
+            );
             namespaceId = renamed.id;
             resolvedTitle = renamed.title;
             supportsUrlEncoding = renamed.supportsUrlEncoding ?? undefined;
