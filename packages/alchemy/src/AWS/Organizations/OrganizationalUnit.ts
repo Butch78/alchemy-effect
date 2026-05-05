@@ -10,6 +10,7 @@ import {
   collectPages,
   createName,
   readResourceTags,
+  retryDeleteEmptiness,
   retryOrganizations,
   updateResourceTags,
 } from "./common.ts";
@@ -175,7 +176,11 @@ export const OrganizationalUnitProvider = () =>
           };
         }),
         delete: Effect.fn(function* ({ output }) {
-          yield* retryOrganizations(
+          // `OrganizationalUnitNotEmptyException` is a true dependency
+          // violation, but the engine deletes children first and the OU's
+          // child listing can lag for a short window. `retryDeleteEmptiness`
+          // bounds the retry; a stuck reference still surfaces.
+          yield* retryDeleteEmptiness(
             organizations
               .deleteOrganizationalUnit({
                 OrganizationalUnitId: output.ouId,

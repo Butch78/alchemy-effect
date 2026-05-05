@@ -301,10 +301,14 @@ const waitForCreateAccount = (requestId: string) =>
 
     return status;
   }).pipe(
+    // Account creation is asynchronous on AWS's side. Typical completion is
+    // ~90s but it can extend past 5 minutes under load or when CloudTrail /
+    // billing setup is slow. Cap at ~10 minutes (300 polls × 2s) so a stuck
+    // request eventually surfaces.
     Effect.retry({
       while: (error: any) => error?._tag === "CreateAccountInProgress",
       schedule: Schedule.spaced("2 seconds").pipe(
-        Schedule.both(Schedule.recurs(120)),
+        Schedule.both(Schedule.recurs(300)),
       ),
     }),
   );

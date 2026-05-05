@@ -11,7 +11,9 @@ import {
   collectPages,
   createName,
   readResourceTags,
+  retryDeleteEmptiness,
   retryOrganizations,
+  stableStringify,
   updateResourceTags,
 } from "./common.ts";
 
@@ -99,6 +101,11 @@ export const PolicyProvider = () =>
         reconcile: Effect.fn(function* ({ id, news, output, session }) {
           const name = yield* toName(id, news);
           const desiredDescription = news.description ?? "";
+          // The AWS API stores the policy document but doesn't preserve key
+          // order on round-trip. Comparing `stableStringify` outputs avoids
+          // a flap where reconcile thinks the doc has drifted just because
+          // keys came back in a different order.
+          const desiredContentForCompare = stableStringify(news.document);
           const desiredContent = JSON.stringify(news.document);
 
           // Observe — locate the policy by ID if known, else by type+name.
@@ -145,10 +152,10 @@ export const PolicyProvider = () =>
           // desired. `updatePolicy` requires `Name`; we keep the existing
           // policy name (rename triggers replacement at the diff level).
           const observedDescription = state.description ?? "";
-          const observedContent = JSON.stringify(state.document);
+          const observedContent = stableStringify(state.document);
           if (
             observedDescription !== desiredDescription ||
-            observedContent !== desiredContent
+            observedContent !== desiredContentForCompare
           ) {
             yield* retryOrganizations(
               organizations.updatePolicy({
@@ -184,7 +191,12 @@ export const PolicyProvider = () =>
           };
         }),
         delete: Effect.fn(function* ({ output }) {
-          yield* retryOrganizations(
+          // `PolicyInUseException` fires when the policy is still attached to
+          // any target. The engine should have detached attachments first via
+          // dependency ordering, but the listing is eventually consistent.
+          // `retryDeleteEmptiness` bounds the retry window; a real persistent
+          // attachment still surfaces.
+          yield* retryDeleteEmptiness(
             organizations
               .deletePolicy({ PolicyId: output.policyId })
               .pipe(

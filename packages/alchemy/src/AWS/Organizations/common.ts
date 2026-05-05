@@ -47,19 +47,72 @@ export const collectPages = <Page extends { NextToken?: string }, Item, E, R>(
     return items;
   });
 
+/**
+ * The Organizations control plane serializes mutating calls per-org and
+ * surfaces a small set of genuinely transient errors when two writes overlap
+ * or the org is mid-finalize. Anything in this list is safe to retry without
+ * additional context.
+ */
+const isRetryableOrganizationsError = (error: any) =>
+  error?._tag === "ConcurrentModificationException" ||
+  error?._tag === "TooManyRequestsException" ||
+  error?._tag === "ServiceException" ||
+  error?._tag === "FinalizingOrganizationException" ||
+  error?._tag === "PolicyChangesInProgressException";
+
 export const retryOrganizations = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.retry({
-      while: (error: any) =>
-        error?._tag === "ConcurrentModificationException" ||
-        error?._tag === "TooManyRequestsException" ||
-        error?._tag === "ServiceException" ||
-        error?._tag === "FinalizingOrganizationException",
-      schedule: Schedule.exponential(200).pipe(
-        Schedule.both(Schedule.recurs(8)),
+      while: isRetryableOrganizationsError,
+      schedule: Schedule.exponential(250).pipe(
+        Schedule.both(Schedule.recurs(12)),
       ),
     }),
   );
+
+/**
+ * Bounded retry for delete-time "container is not empty" errors. After the
+ * engine deletes child resources, the parent delete can still see them for a
+ * short eventual-consistency window. We cap the retry so a genuine, persistent
+ * dependency surfaces as a real error instead of hanging indefinitely.
+ */
+export const retryDeleteEmptiness = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.retry({
+      while: (error: any) =>
+        isRetryableOrganizationsError(error) ||
+        error?._tag === "OrganizationNotEmptyException" ||
+        error?._tag === "OrganizationalUnitNotEmptyException" ||
+        error?._tag === "PolicyInUseException",
+      schedule: Schedule.exponential(500).pipe(
+        Schedule.both(Schedule.recurs(10)),
+      ),
+    }),
+  );
+
+/**
+ * Deterministic JSON stringifier for comparing policy documents. Object key
+ * order isn't preserved by AWS round-trips, so the naive `JSON.stringify`
+ * comparison can flap and trigger needless `updatePolicy` calls (or, worse,
+ * mask real drift in the other direction).
+ */
+export const stableStringify = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    return `{${keys
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${stableStringify(
+            (value as Record<string, unknown>)[key],
+          )}`,
+      )
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
 
 export const createManagedTags = Effect.fn(function* (
   id: string,

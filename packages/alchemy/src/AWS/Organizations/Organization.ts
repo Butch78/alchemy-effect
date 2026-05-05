@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { retryOrganizations } from "./common.ts";
+import { retryDeleteEmptiness, retryOrganizations } from "./common.ts";
 
 export type OrganizationId = string;
 export type OrganizationArn = string;
@@ -108,7 +108,13 @@ export const OrganizationProvider = () =>
           return toAttrs(org);
         }),
         delete: Effect.fn(function* () {
-          yield* retryOrganizations(
+          // `OrganizationNotEmptyException` is permanent in the sense that we
+          // can't retry our way out of unrelated children, but immediately
+          // after the engine removes child accounts/OUs the listing is
+          // eventually consistent and can briefly still report the org as
+          // non-empty. `retryDeleteEmptiness` caps the retry window so a
+          // genuine dependency surfaces instead of hanging.
+          yield* retryDeleteEmptiness(
             organizations
               .deleteOrganization({})
               .pipe(

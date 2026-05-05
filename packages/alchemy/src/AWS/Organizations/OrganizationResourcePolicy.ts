@@ -4,7 +4,7 @@ import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
 import type { PolicyDocument } from "../IAM/Policy.ts";
-import { retryOrganizations } from "./common.ts";
+import { retryOrganizations, stableStringify } from "./common.ts";
 
 export interface OrganizationResourcePolicyProps {
   /**
@@ -64,6 +64,10 @@ export const OrganizationResourcePolicyProvider = () =>
         }),
         reconcile: Effect.fn(function* ({ news, session }) {
           const desiredContent = JSON.stringify(news.document);
+          // AWS doesn't preserve object key order on round-trip; compare
+          // documents through a stable stringifier so reconcile doesn't flap
+          // and re-`putResourcePolicy` on every run.
+          const desiredContentForCompare = stableStringify(news.document);
 
           // Observe — fetch the live resource policy (or absence).
           let state = yield* readResourcePolicy();
@@ -72,12 +76,12 @@ export const OrganizationResourcePolicyProvider = () =>
           // first-create and update. We diff observed content against
           // desired so the call only fires when there's drift. Reading by
           // ID isn't possible (resource is a singleton with a server-issued
-          // ID), so we compare the JSON-stringified document.
+          // ID), so we compare key-order-stable serializations.
           const observedContent = state
-            ? JSON.stringify(state.document)
+            ? stableStringify(state.document)
             : undefined;
 
-          if (observedContent !== desiredContent) {
+          if (observedContent !== desiredContentForCompare) {
             yield* retryOrganizations(
               organizations.putResourcePolicy({
                 Content: desiredContent,
