@@ -46,7 +46,19 @@ export interface ObjectRef {
 /**
  * Binds a Kubernetes object definition onto an `AWS.EKS.Cluster`.
  *
- * This is the low-level escape hatch for TypeScript-defined Kubernetes objects.
+ * This is the low-level escape hatch for any TypeScript-defined Kubernetes
+ * object — including custom resources (CRs) backed by a CustomResourceDefinition
+ * (CRD). Alchemy doesn't validate the schema; the API server does, on apply.
+ *
+ * The object is reconciled via server-side apply with `fieldManager=alchemy`
+ * and `force=true`, so re-deploying the same body is a true no-op and any
+ * out-of-band edits to fields Alchemy owns are reverted on the next deploy.
+ *
+ * Caveat: `apiVersion`/`kind` must be one of the canonical kinds known to
+ * `getKubernetesKindSpec` (Namespace, ServiceAccount, ConfigMap, Service,
+ * Deployment, Job). Adding a new kind requires updating `supportedKinds` in
+ * `types.ts` so Alchemy knows the resource's plural name and apply rank for
+ * dependency-correct ordering.
  *
  * @example Bind a raw Kubernetes object
  * ```typescript
