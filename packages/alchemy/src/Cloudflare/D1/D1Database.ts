@@ -397,6 +397,23 @@ export const DatabaseProvider = () =>
           let databaseName: string;
           const isFirstCreation = !observed;
           if (!observed) {
+            // Race recovery: another concurrent reconcile (or a previous
+            // run that failed to persist its output) may have created the
+            // database between our observation and our `createDatabase`.
+            // Cloudflare reports this as `DatabaseAlreadyExists` (the
+            // canonical 409 mapping) or, on older paths, as a generic
+            // `InvalidProperty` complaining about the name. Catch both,
+            // re-list, and adopt the existing row instead of failing.
+            const onConflict = Effect.gen(function* () {
+              const dbs = yield* listDbs({ accountId: acct, name });
+              const match = dbs.result.find((db) => db.name === name);
+              if (match) {
+                return match;
+              }
+              return yield* Effect.die(
+                `Database with name "${name}" already exists but could not be found`,
+              );
+            });
             const db = yield* createDb({
               accountId: acct,
               name,
@@ -404,18 +421,8 @@ export const DatabaseProvider = () =>
                 jurisdiction !== "default" ? jurisdiction : undefined,
               primaryLocationHint: news.primaryLocationHint,
             }).pipe(
-              Effect.catchTag("InvalidProperty", () =>
-                Effect.gen(function* () {
-                  const dbs = yield* listDbs({ accountId: acct, name });
-                  const match = dbs.result.find((db) => db.name === name);
-                  if (match) {
-                    return match;
-                  }
-                  return yield* Effect.die(
-                    `Database with name "${name}" already exists but could not be found`,
-                  );
-                }),
-              ),
+              Effect.catchTag("DatabaseAlreadyExists", () => onConflict),
+              Effect.catchTag("InvalidProperty", () => onConflict),
             );
             databaseId = db.uuid!;
             databaseName = db.name ?? name;

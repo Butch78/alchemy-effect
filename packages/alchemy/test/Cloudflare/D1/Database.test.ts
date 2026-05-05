@@ -1,3 +1,4 @@
+import { adopt } from "@/AdoptPolicy";
 import * as Cloudflare from "@/Cloudflare";
 import { CloudflareEnvironment } from "@/Cloudflare/CloudflareEnvironment";
 import { State } from "@/State";
@@ -645,3 +646,383 @@ class DatabaseStillExists extends Data.TaggedError("DatabaseStillExists") {}
 class EmptyResults extends Data.TaggedError("EmptyResults")<{
   sql: string;
 }> {}
+
+// ─────────────────────────────────────────────────────────────────────
+// Lifecycle convergence
+//
+// Reconcile must converge from any starting state — pristine, drifted,
+// out-of-band-deleted, or replaced — without leaning on `olds` as the
+// source of truth. The tests below pin down each of those starting
+// states.
+// ─────────────────────────────────────────────────────────────────────
+
+test.provider(
+  "redeploy with same props is a no-op — physical id preserved",
+  (stack) =>
+    Effect.gen(function* () {
+      const { accountId } = yield* CloudflareEnvironment;
+
+      yield* stack.destroy();
+
+      const v1 = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("IdempotentDb", {
+            readReplication: { mode: "disabled" },
+          });
+        }),
+      );
+
+      const v2 = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("IdempotentDb", {
+            readReplication: { mode: "disabled" },
+          });
+        }),
+      );
+
+      // Same physical id — reconciler did not replace and did not
+      // collide with itself on the createDatabase race path.
+      expect(v2.databaseId).toEqual(v1.databaseId);
+      expect(v2.databaseName).toEqual(v1.databaseName);
+
+      // The database is still healthy on Cloudflare.
+      const live = yield* d1.getDatabase({
+        accountId,
+        databaseId: v2.databaseId,
+      });
+      expect(live.uuid).toEqual(v1.databaseId);
+
+      yield* stack.destroy();
+      yield* waitForDatabaseToBeDeleted(v1.databaseId, accountId);
+    }).pipe(logLevel),
+);
+
+test.provider(
+  "reconcile resets read_replication.mode mutated out-of-band",
+  (stack) =>
+    Effect.gen(function* () {
+      const { accountId } = yield* CloudflareEnvironment;
+
+      yield* stack.destroy();
+
+      // Phase 1: deploy with replication explicitly disabled.
+      const v1 = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("DriftDb", {
+            readReplication: { mode: "disabled" },
+          });
+        }),
+      );
+
+      // Mutate replication out-of-band — patch directly via the raw D1
+      // SDK. This is the kind of drift you'd see from someone editing
+      // the database in the Cloudflare dashboard.
+      const patched = yield* d1.patchDatabase({
+        accountId,
+        databaseId: v1.databaseId,
+        readReplication: { mode: "auto" },
+      });
+      expect(patched.readReplication?.mode).toEqual("auto");
+
+      // Re-deploy with the original desired props — reconcile must
+      // observe the drifted "auto" mode and patch back to "disabled"
+      // even though `olds.readReplication.mode` matches `news`. This
+      // is the observe-vs-`olds` invariant.
+      const v2 = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("DriftDb", {
+            readReplication: { mode: "disabled" },
+          });
+        }),
+      );
+      expect(v2.databaseId).toEqual(v1.databaseId);
+
+      const live = yield* d1.getDatabase({
+        accountId,
+        databaseId: v2.databaseId,
+      });
+      expect(live.readReplication?.mode).toEqual("disabled");
+
+      yield* stack.destroy();
+      yield* waitForDatabaseToBeDeleted(v1.databaseId, accountId);
+    }).pipe(logLevel),
+);
+
+test.provider(
+  "reconcile re-creates a database that was deleted out-of-band",
+  (stack) =>
+    Effect.gen(function* () {
+      const { accountId } = yield* CloudflareEnvironment;
+
+      yield* stack.destroy();
+
+      const databaseName = `alchemy-test-d1-recreate-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      const v1 = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("RecreateDb", {
+            name: databaseName,
+          });
+        }),
+      );
+      expect(v1.databaseName).toEqual(databaseName);
+      const originalId = v1.databaseId;
+
+      // Delete the database out-of-band — local state still says it
+      // exists, Cloudflare disagrees.
+      yield* d1.deleteDatabase({
+        accountId,
+        databaseId: originalId,
+      });
+      yield* waitForDatabaseToBeDeleted(originalId, accountId);
+
+      // Reconcile must observe the missing database via getDatabase
+      // (now `DatabaseNotFound`), fall through to listDatabases (also
+      // missing), and create a fresh one with the same desired name.
+      const v2 = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("RecreateDb", {
+            name: databaseName,
+          });
+        }),
+      );
+      expect(v2.databaseName).toEqual(databaseName);
+      // Different physical uuid — Cloudflare assigns a new one on
+      // re-create. The state must be the new id, not the stale one.
+      expect(v2.databaseId).not.toEqual(originalId);
+
+      const live = yield* d1.getDatabase({
+        accountId,
+        databaseId: v2.databaseId,
+      });
+      expect(live.uuid).toEqual(v2.databaseId);
+
+      yield* stack.destroy();
+      yield* waitForDatabaseToBeDeleted(v2.databaseId, accountId);
+    }).pipe(logLevel),
+);
+
+test.provider(
+  "changing databaseName triggers replace; old database is deleted",
+  (stack) =>
+    Effect.gen(function* () {
+      const { accountId } = yield* CloudflareEnvironment;
+
+      yield* stack.destroy();
+
+      const suffix = Math.random().toString(36).slice(2, 8);
+      const nameA = `alchemy-test-d1-replace-a-${suffix}`;
+      const nameB = `alchemy-test-d1-replace-b-${suffix}`;
+
+      const a = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("RenameDb", {
+            name: nameA,
+          });
+        }),
+      );
+      expect(a.databaseName).toEqual(nameA);
+
+      const b = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("RenameDb", {
+            name: nameB,
+          });
+        }),
+      );
+      expect(b.databaseName).toEqual(nameB);
+      // Different physical database — replacement, not in-place rename.
+      expect(b.databaseId).not.toEqual(a.databaseId);
+
+      // The previous physical database must be gone after replace. The
+      // engine creates B, swaps the reference, then deletes A.
+      yield* waitForDatabaseToBeDeleted(a.databaseId, accountId);
+
+      const liveB = yield* d1.getDatabase({
+        accountId,
+        databaseId: b.databaseId,
+      });
+      expect(liveB.uuid).toEqual(b.databaseId);
+
+      yield* stack.destroy();
+      yield* waitForDatabaseToBeDeleted(b.databaseId, accountId);
+    }).pipe(logLevel),
+);
+
+test.provider(
+  "migrations recover from a partial-failure mid-batch on next deploy",
+  (stack) =>
+    Effect.gen(function* () {
+      const { accountId } = yield* CloudflareEnvironment;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const migrationsDir = yield* fs.makeTempDirectory({
+        prefix: "alchemy-d1-resume-",
+      });
+
+      yield* fs.writeFileString(
+        path.join(migrationsDir, "0001_first.sql"),
+        "CREATE TABLE first_table (id INTEGER PRIMARY KEY);",
+      );
+      yield* fs.writeFileString(
+        path.join(migrationsDir, "0002_second.sql"),
+        "CREATE TABLE second_table (id INTEGER PRIMARY KEY);",
+      );
+
+      yield* stack.destroy();
+
+      // Phase 1: deploy without a migrationsDir so the database exists
+      // but no migrations table is set up.
+      const seeded = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("ResumeMigrationsDb");
+        }),
+      );
+
+      // Simulate a partial failure: pretend the previous run applied
+      // 0001 but crashed before applying 0002. We seed the migrations
+      // table by hand with the wrangler-compatible 3-column schema and
+      // run the 0001 SQL ourselves. The next deploy must observe that
+      // 0001 is already applied (skip it) and apply only 0002.
+      yield* execSql(
+        accountId,
+        seeded.databaseId,
+        `CREATE TABLE d1_migrations (
+           id TEXT PRIMARY KEY,
+           name TEXT NOT NULL,
+           applied_at TEXT NOT NULL
+         );`,
+      );
+      yield* execSql(
+        accountId,
+        seeded.databaseId,
+        "CREATE TABLE first_table (id INTEGER PRIMARY KEY);",
+      );
+      yield* execSql(
+        accountId,
+        seeded.databaseId,
+        `INSERT INTO d1_migrations (id, name, applied_at)
+         VALUES ('00001', '0001_first.sql', datetime('now'));`,
+      );
+
+      // Phase 2: deploy with the migrationsDir. Reconcile reads the
+      // applied set from d1_migrations, sees 0001 is already there, and
+      // applies only 0002. It must NOT re-run 0001 (which would fail
+      // with "table first_table already exists").
+      const resumed = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("ResumeMigrationsDb", {
+            migrationsDir,
+          });
+        }),
+      );
+      expect(resumed.databaseId).toEqual(seeded.databaseId);
+
+      const tables = yield* listTables(accountId, seeded.databaseId);
+      expect(tables).toContain("first_table");
+      expect(tables).toContain("second_table");
+
+      const applied = yield* queryAll<{ id: string; name: string }>(
+        accountId,
+        seeded.databaseId,
+        "SELECT id, name FROM d1_migrations ORDER BY id;",
+      );
+      // 0001 was already there with id 00001; 0002 picks up the next
+      // sequential id (00002) — no duplicate rows for 0001.
+      expect(applied).toEqual([
+        { id: "00001", name: "0001_first.sql" },
+        { id: "00002", name: "0002_second.sql" },
+      ]);
+
+      yield* stack.destroy();
+      yield* waitForDatabaseToBeDeleted(seeded.databaseId, accountId);
+    }).pipe(logLevel),
+);
+
+test.provider("destroying an already-deleted database is a no-op", (stack) =>
+  Effect.gen(function* () {
+    const { accountId } = yield* CloudflareEnvironment;
+
+    yield* stack.destroy();
+
+    const db = yield* stack.deploy(
+      Effect.gen(function* () {
+        return yield* Cloudflare.D1Database("DoubleDestroyDb");
+      }),
+    );
+
+    // Delete out-of-band so the next destroy hits the
+    // `DatabaseNotFound` path inside provider.delete. It must succeed.
+    yield* d1.deleteDatabase({
+      accountId,
+      databaseId: db.databaseId,
+    });
+    yield* waitForDatabaseToBeDeleted(db.databaseId, accountId);
+
+    // First destroy: the engine still has state for this resource;
+    // delete should idempotently succeed because the underlying
+    // `deleteDatabase` call catches DatabaseNotFound.
+    yield* stack.destroy();
+
+    // Second destroy: state is gone; this is a true no-op. Repeated
+    // destroys must never throw.
+    yield* stack.destroy();
+  }).pipe(logLevel),
+);
+
+test.provider("adopt(true) re-claims a foreign database by name", (stack) =>
+  Effect.gen(function* () {
+    const { accountId } = yield* CloudflareEnvironment;
+
+    yield* stack.destroy();
+
+    const databaseName = `alchemy-test-d1-takeover-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+
+    // Phase 1: deploy under one logical id so a real D1 database
+    // exists outside of the to-be-tested logical id.
+    const original = yield* stack.deploy(
+      Effect.gen(function* () {
+        return yield* Cloudflare.D1Database("OriginalOwner", {
+          name: databaseName,
+        });
+      }),
+    );
+    expect(original.databaseName).toEqual(databaseName);
+
+    // Phase 2: drop the local state for the original logical id — the
+    // database stays on Cloudflare with no owning state row.
+    yield* Effect.gen(function* () {
+      const state = yield* State;
+      yield* state.delete({
+        stack: stack.name,
+        stage: "test",
+        fqn: "OriginalOwner",
+      });
+    }).pipe(Effect.provide(stack.state));
+
+    // Phase 3: deploy under a *different* logical id with `adopt(true)`.
+    // D1 has no tag-based ownership, so `read` matches the database by
+    // name and the engine adopts it under the new logical id. The
+    // physical database is the same; only the local state row's fqn
+    // changes.
+    const adopted = yield* stack
+      .deploy(
+        Effect.gen(function* () {
+          return yield* Cloudflare.D1Database("NewOwner", {
+            name: databaseName,
+          });
+        }),
+      )
+      .pipe(adopt(true));
+
+    expect(adopted.databaseName).toEqual(databaseName);
+    expect(adopted.databaseId).toEqual(original.databaseId);
+
+    yield* stack.destroy();
+    yield* waitForDatabaseToBeDeleted(original.databaseId, accountId);
+  }).pipe(logLevel),
+);

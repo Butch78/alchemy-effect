@@ -45,22 +45,27 @@ const detectSchema = (
   migrationsTable: string,
 ) =>
   Effect.gen(function* () {
+    // `PRAGMA table_info(...)` against a non-existent table returns 200 OK
+    // with an empty result set, so we don't need to swallow errors here.
+    // A failure (auth, throttling, 5xx, parse) MUST surface so the engine
+    // can retry / report — wrapping in `Effect.option` previously made
+    // every transient blip look like "table doesn't exist", which then
+    // dropped us into the legacy-schema migration path on a database
+    // that just had an in-flight 503.
     const result = yield* executeSQL(
       accountId,
       databaseId,
       `PRAGMA table_info(${migrationsTable});`,
-    ).pipe(Effect.option);
+    );
 
     const columns: TableColumn[] = [];
-    if (result._tag === "Some") {
-      const rows = (result.value.result[0]?.results ?? []) as Array<{
-        name: string;
-        type: string;
-        pk: number;
-      }>;
-      for (const row of rows) {
-        columns.push({ name: row.name, type: row.type, pk: row.pk });
-      }
+    const rows = (result.result[0]?.results ?? []) as Array<{
+      name: string;
+      type: string;
+      pk: number;
+    }>;
+    for (const row of rows) {
+      columns.push({ name: row.name, type: row.type, pk: row.pk });
     }
 
     if (columns.length === 0) {
