@@ -8,6 +8,7 @@ dist/
 .env
 *.tsbuildinfo
 .claude/
+.worktrees/
 .alchemy/
 # !.alchemy/github:alchemy/
 # examples/*/.alchemy

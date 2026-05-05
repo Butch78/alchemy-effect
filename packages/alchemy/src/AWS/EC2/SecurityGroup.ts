@@ -2,12 +2,19 @@ import * as ec2 from "@distilled.cloud/aws/ec2";
 import { Region } from "@distilled.cloud/aws/Region";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags, createTagsList, diffTags } from "../../Tags.ts";
+import {
+  createAlchemyTagFilters,
+  createInternalTags,
+  createTagsList,
+  diffTags,
+  hasAlchemyTags,
+} from "../../Tags.ts";
 import type { AccountID } from "../Environment.ts";
 import { AWSEnvironment } from "../Environment.ts";
 import type { RegionID } from "../Region.ts";
@@ -200,20 +207,109 @@ export const SecurityGroupProvider = () =>
           return yield* createPhysicalName({ id, maxLength: 255 });
         });
 
+      // Bounded retry for the eventual-consistency window right after
+      // createSecurityGroup — describeSecurityGroups can briefly miss a
+      // freshly-minted SG, surfacing as InvalidGroup.NotFound or an empty
+      // result.
+      const retryEventuallyConsistent = <A, E, R>(
+        eff: Effect.Effect<A, E, R>,
+      ) =>
+        eff.pipe(
+          Effect.retry({
+            while: (e: { readonly _tag?: string } | unknown) =>
+              (e as { readonly _tag?: string })?._tag ===
+                "InvalidGroup.NotFound" ||
+              (e as { readonly _tag?: string })?._tag ===
+                "SecurityGroupNotVisible",
+            schedule: Schedule.exponential(100).pipe(
+              Schedule.both(Schedule.recurs(10)),
+            ),
+          }),
+        );
+
+      // Hard variant — fails if the SG isn't returned. Use only after we've
+      // confirmed (or just minted) the SG and a missing result indicates a
+      // genuine inconsistency. Wraps the lookup in `retryEventuallyConsistent`
+      // so post-create races don't surface as hard failures.
       const describeSecurityGroup = (groupId: string) =>
-        ec2.describeSecurityGroups({ GroupIds: [groupId] }).pipe(
-          Effect.map((r) => r.SecurityGroups?.[0]),
-          Effect.flatMap((sg) =>
-            sg
-              ? Effect.succeed(sg)
-              : Effect.fail(new Error(`Security Group ${groupId} not found`)),
+        retryEventuallyConsistent(
+          ec2.describeSecurityGroups({ GroupIds: [groupId] }).pipe(
+            Effect.flatMap((r) =>
+              r.SecurityGroups?.[0]
+                ? Effect.succeed(r.SecurityGroups[0])
+                : Effect.fail({
+                    _tag: "SecurityGroupNotVisible" as const,
+                    groupId,
+                  }),
+            ),
           ),
         );
+
+      // Soft variant — InvalidGroup.NotFound (e.g. SG deleted out-of-band) is
+      // collapsed into `undefined`. Use anywhere we want missing-as-empty
+      // semantics during reconcile/read instead of propagating the error.
+      const findSecurityGroup = (groupId: string) =>
+        ec2
+          .describeSecurityGroups({ GroupIds: [groupId] })
+          .pipe(
+            Effect.map((r) => r.SecurityGroups?.[0]),
+            Effect.catchTag("InvalidGroup.NotFound", () =>
+              Effect.succeed(undefined),
+            ),
+          );
 
       const describeSecurityGroupRules = (groupId: string) =>
         ec2.describeSecurityGroupRules({
           Filters: [{ Name: "group-id", Values: [groupId] }],
         });
+
+      // Stable canonical form of an SG rule used for diffing observed cloud
+      // rules against the desired set. Includes everything that affects rule
+      // identity in AWS (protocol/ports/source) plus the description. AWS
+      // collapses identical rule shapes into one rule even when authorize is
+      // called multiple times, so this canonicalization is what matches.
+      const canonicalRuleKey = (rule: {
+        ipProtocol: string;
+        fromPort: number | undefined;
+        toPort: number | undefined;
+        cidrIpv4: string | undefined;
+        cidrIpv6: string | undefined;
+        referencedGroupId: string | undefined;
+        prefixListId: string | undefined;
+        description: string | undefined;
+      }) =>
+        JSON.stringify({
+          ipProtocol: rule.ipProtocol,
+          fromPort: rule.fromPort ?? null,
+          toPort: rule.toPort ?? null,
+          cidrIpv4: rule.cidrIpv4 ?? null,
+          cidrIpv6: rule.cidrIpv6 ?? null,
+          referencedGroupId: rule.referencedGroupId ?? null,
+          prefixListId: rule.prefixListId ?? null,
+          description: rule.description ?? null,
+        });
+
+      const observedToCanonical = (rule: ec2.SecurityGroupRule) => ({
+        ipProtocol: rule.IpProtocol!,
+        fromPort: rule.FromPort,
+        toPort: rule.ToPort,
+        cidrIpv4: rule.CidrIpv4,
+        cidrIpv6: rule.CidrIpv6,
+        referencedGroupId: rule.ReferencedGroupInfo?.GroupId,
+        prefixListId: rule.PrefixListId,
+        description: rule.Description,
+      });
+
+      const desiredToCanonical = (rule: SecurityGroupRuleData) => ({
+        ipProtocol: rule.ipProtocol,
+        fromPort: rule.fromPort,
+        toPort: rule.toPort,
+        cidrIpv4: rule.cidrIpv4,
+        cidrIpv6: rule.cidrIpv6,
+        referencedGroupId: rule.referencedGroupId,
+        prefixListId: rule.prefixListId,
+        description: rule.description,
+      });
 
       const toAttrs = (
         sg: ec2.SecurityGroup,
@@ -289,11 +385,33 @@ export const SecurityGroupProvider = () =>
       return {
         stables: ["groupId", "groupArn", "ownerId"],
 
-        read: Effect.fn(function* ({ output }) {
-          if (!output) return undefined;
-          const sg = yield* describeSecurityGroup(output.groupId);
-          const rulesResult = yield* describeSecurityGroupRules(output.groupId);
-          return toAttrs(sg, rulesResult.SecurityGroupRules ?? []);
+        read: Effect.fn(function* ({ id, output }) {
+          // Fast path — if state has the groupId, look it up directly. A
+          // missing result here means the SG was deleted out of band; surface
+          // as `undefined` so the engine treats it as a fresh create rather
+          // than failing the read.
+          let sg: ec2.SecurityGroup | undefined;
+          if (output?.groupId) {
+            sg = yield* findSecurityGroup(output.groupId);
+          } else {
+            // Slow path / adoption — search by alchemy tags so a wiped state
+            // file can re-discover an SG we previously created.
+            const filters = yield* createAlchemyTagFilters(id);
+            const found = yield* ec2.describeSecurityGroups({
+              Filters: filters,
+            });
+            sg = found.SecurityGroups?.[0];
+          }
+          if (!sg) return undefined;
+          const rulesResult = yield* describeSecurityGroupRules(sg.GroupId!);
+          const attrs = toAttrs(sg, rulesResult.SecurityGroupRules ?? []);
+          // Foreign-tagged SGs require explicit `adopt(true)` to take over.
+          const tagRecord = Object.fromEntries(
+            (sg.Tags ?? []).map((t) => [t.Key!, t.Value!]),
+          );
+          return (yield* hasAlchemyTags(id, tagRecord))
+            ? attrs
+            : Unowned(attrs);
         }),
 
         diff: Effect.fn(function* ({ id, news, olds, output }) {
@@ -377,77 +495,100 @@ export const SecurityGroupProvider = () =>
             });
           }
 
-          // Sync ingress + egress rules — revoke whatever is observed and
-          // reapply the desired set. SG rule diffing on this SDK is non-
-          // trivial because each rule has many possible source shapes
-          // (cidr/group ref/prefix list), so the simplest convergent strategy
-          // is full-replace each reconcile. Default egress (-1, 0.0.0.0/0)
-          // is restored when no explicit egress is desired.
+          // Sync ingress + egress rules — diff observed canonical rules
+          // against desired and apply only the delta. AWS deduplicates
+          // identical rule shapes into a single rule, so a stable canonical
+          // key (protocol + port range + source + description) drives the
+          // diff. Default egress (-1, 0.0.0.0/0) is the AWS-side default
+          // when an SG is created and is reapplied here when no explicit
+          // egress is desired so out-of-band revocation converges back.
           const currentRulesResult = yield* describeSecurityGroupRules(groupId);
           const currentRules = currentRulesResult.SecurityGroupRules ?? [];
-          const currentIngress = currentRules.filter((r) => !r.IsEgress);
-          const currentEgress = currentRules.filter((r) => r.IsEgress);
-          if (currentIngress.length > 0) {
-            yield* ec2
-              .revokeSecurityGroupIngress({
-                GroupId: groupId,
-                SecurityGroupRuleIds: currentIngress.map(
-                  (r) => r.SecurityGroupRuleId!,
-                ),
-                DryRun: false,
-              })
-              .pipe(
-                Effect.catchTag(
-                  "InvalidPermission.NotFound",
-                  () => Effect.void,
-                ),
-              );
-          }
-          if (currentEgress.length > 0) {
-            yield* ec2
-              .revokeSecurityGroupEgress({
-                GroupId: groupId,
-                SecurityGroupRuleIds: currentEgress.map(
-                  (r) => r.SecurityGroupRuleId!,
-                ),
-                DryRun: false,
-              })
-              .pipe(
-                Effect.catchTag(
-                  "InvalidPermission.NotFound",
-                  () => Effect.void,
-                ),
-              );
-          }
-          if (news.ingress && news.ingress.length > 0) {
-            yield* ec2.authorizeSecurityGroupIngress({
-              GroupId: groupId,
-              IpPermissions: news.ingress.map(toIpPermission),
-              DryRun: false,
-            });
-            yield* session.note(`Applied ${news.ingress.length} ingress rules`);
-          }
-          if (news.egress && news.egress.length > 0) {
-            yield* ec2.authorizeSecurityGroupEgress({
-              GroupId: groupId,
-              IpPermissions: news.egress.map(toIpPermission),
-              DryRun: false,
-            });
-            yield* session.note(`Applied ${news.egress.length} egress rules`);
-          } else {
-            yield* ec2.authorizeSecurityGroupEgress({
-              GroupId: groupId,
-              IpPermissions: [
-                {
-                  IpProtocol: "-1",
-                  IpRanges: [{ CidrIp: "0.0.0.0/0" }],
-                },
-              ],
-              DryRun: false,
-            });
-          }
+          const observedIngress = currentRules.filter((r) => !r.IsEgress);
+          const observedEgress = currentRules.filter((r) => r.IsEgress);
 
-          // Re-read final state.
+          const desiredIngress = news.ingress ?? [];
+          const desiredEgress: SecurityGroupRuleData[] =
+            news.egress && news.egress.length > 0
+              ? news.egress
+              : [{ ipProtocol: "-1", cidrIpv4: "0.0.0.0/0" }];
+
+          const syncRules = (
+            observed: ec2.SecurityGroupRule[],
+            desired: SecurityGroupRuleData[],
+            kind: "ingress" | "egress",
+          ) =>
+            Effect.gen(function* () {
+              const observedKeys = new Map(
+                observed.map((r) => [
+                  canonicalRuleKey(observedToCanonical(r)),
+                  r,
+                ]),
+              );
+              const desiredKeys = new Map(
+                desired.map((r) => [
+                  canonicalRuleKey(desiredToCanonical(r)),
+                  r,
+                ]),
+              );
+              const toRevoke = [...observedKeys.entries()]
+                .filter(([k]) => !desiredKeys.has(k))
+                .map(([, r]) => r.SecurityGroupRuleId!)
+                .filter((x): x is string => Boolean(x));
+              const toAuthorize = [...desiredKeys.entries()]
+                .filter(([k]) => !observedKeys.has(k))
+                .map(([, r]) => r);
+
+              if (toRevoke.length > 0) {
+                const revokeReq = {
+                  GroupId: groupId,
+                  SecurityGroupRuleIds: toRevoke,
+                  DryRun: false,
+                };
+                if (kind === "ingress") {
+                  yield* ec2
+                    .revokeSecurityGroupIngress(revokeReq)
+                    .pipe(
+                      Effect.catchTag(
+                        "InvalidPermission.NotFound",
+                        () => Effect.void,
+                      ),
+                    );
+                } else {
+                  yield* ec2
+                    .revokeSecurityGroupEgress(revokeReq)
+                    .pipe(
+                      Effect.catchTag(
+                        "InvalidPermission.NotFound",
+                        () => Effect.void,
+                      ),
+                    );
+                }
+                yield* session.note(
+                  `Revoked ${toRevoke.length} ${kind} rules`,
+                );
+              }
+              if (toAuthorize.length > 0) {
+                const authorizeReq = {
+                  GroupId: groupId,
+                  IpPermissions: toAuthorize.map(toIpPermission),
+                  DryRun: false,
+                };
+                if (kind === "ingress") {
+                  yield* ec2.authorizeSecurityGroupIngress(authorizeReq);
+                } else {
+                  yield* ec2.authorizeSecurityGroupEgress(authorizeReq);
+                }
+                yield* session.note(
+                  `Authorized ${toAuthorize.length} ${kind} rules`,
+                );
+              }
+            });
+
+          yield* syncRules(observedIngress, desiredIngress, "ingress");
+          yield* syncRules(observedEgress, desiredEgress, "egress");
+
+          // Re-read final state via the bounded eventual-consistency retry.
           const finalSg = yield* describeSecurityGroup(groupId);
           const finalRules = yield* describeSecurityGroupRules(groupId);
           return toAttrs(finalSg, finalRules.SecurityGroupRules ?? []);
@@ -465,15 +606,13 @@ export const SecurityGroupProvider = () =>
             })
             .pipe(
               Effect.catchTag("InvalidGroup.NotFound", () => Effect.void),
-              // Retry on dependency violations (e.g., ENIs still using the security group)
+              // Retry on dependency violations (e.g., ENIs still using the
+              // security group). Distilled tags `DependencyViolation`
+              // directly via `withDependencyViolationError`, so a substring
+              // match against `ValidationError.message` is dead code that
+              // would only swallow unrelated ValidationErrors.
               Effect.retry({
-                while: (e) => {
-                  return (
-                    e._tag === "DependencyViolation" ||
-                    (e._tag === "ValidationError" &&
-                      e.message?.includes("DependencyViolation"))
-                  );
-                },
+                while: (e) => e._tag === "DependencyViolation",
                 schedule: Schedule.fixed(5000).pipe(
                   Schedule.both(Schedule.recurs(30)), // Up to ~2.5 minutes
                   Schedule.tapOutput(([, attempt]) =>
