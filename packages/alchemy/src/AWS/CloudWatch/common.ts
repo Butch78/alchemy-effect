@@ -85,10 +85,14 @@ export const createTagList = (tags: Record<string, string>) =>
 export const retryConcurrent = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.retry({
+      // ConcurrentModificationException / ConflictException signal a
+      // genuine race against another writer — bounded exponential retry.
+      // Capacity errors (`LimitException*`) are NOT retried here: AWS
+      // means "raise the alarm quota", not "try again", so retrying just
+      // burns 8 attempts before surfacing the same error.
       while: (error: any) =>
         error?._tag === "ConcurrentModificationException" ||
-        error?._tag === "ConflictException" ||
-        error?._tag === "LimitExceededException",
+        error?._tag === "ConflictException",
       schedule: Schedule.exponential(200).pipe(
         Schedule.both(Schedule.recurs(8)),
       ),

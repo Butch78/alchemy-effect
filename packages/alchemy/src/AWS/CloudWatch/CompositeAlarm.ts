@@ -124,16 +124,19 @@ export const CompositeAlarmProvider = () =>
             ? state
             : Unowned(state);
         }),
-        reconcile: Effect.fn(function* ({ id, news, olds, output, session }) {
+        reconcile: Effect.fn(function* ({ id, news, output, session }) {
           // Observe — pin the physical name from `output` if present so we
           // never rename an existing alarm; otherwise derive from desired
-          // props.
+          // props. We never trust `output` blindly: if the alarm was
+          // deleted out-of-band, `existing` is undefined and the upsert
+          // recreates.
           const name = output?.alarmName ?? (yield* createAlarmName(id, news));
           const existing = yield* readCompositeAlarm(name);
 
           // Ensure — `putCompositeAlarm` is an upsert. We always send the
           // full desired config so the cloud converges to `news` whether
-          // the alarm pre-existed or not.
+          // the alarm pre-existed (greenfield, drifted, or
+          // out-of-band-deleted).
           yield* retryConcurrent(
             cloudwatch.putCompositeAlarm({
               ...news,
@@ -141,13 +144,13 @@ export const CompositeAlarmProvider = () =>
             }),
           );
 
-          // Sync tags — diff observed (or prior) tags against desired.
-          // `olds` is undefined on adoption, so fall back to what we just
-          // observed.
+          // Sync tags — diff OBSERVED cloud tags against desired so
+          // adoption (foreign user tags) and out-of-band tag mutations
+          // both converge correctly. `olds` is never the source of truth.
           const tags = yield* updateResourceTags({
             id,
             resourceArn: alarmArn(name),
-            olds: olds?.tags ?? existing?.tags,
+            olds: existing?.tags,
             news: news.tags,
           });
 
@@ -166,10 +169,14 @@ export const CompositeAlarmProvider = () =>
           };
         }),
         delete: Effect.fn(function* ({ output }) {
+          // `DeleteAlarms` returns `ResourceNotFound` if the alarm is
+          // already gone. Treat it as success so destroy is idempotent.
           yield* retryConcurrent(
             cloudwatch.deleteAlarms({
               AlarmNames: [output.alarmName],
             }),
+          ).pipe(
+            Effect.catchTag("ResourceNotFound", () => Effect.void),
           );
         }),
       };
