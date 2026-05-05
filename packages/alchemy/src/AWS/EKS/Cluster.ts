@@ -166,6 +166,14 @@ const updateRetrySchedule = Schedule.exponential("1 second").pipe(
   Schedule.both(Schedule.recurs(120)),
 );
 
+// Bounded retry for "an update/operation is already in progress" races.
+// EKS surfaces these as `ResourceInUseException` on update API calls when
+// the control plane is still applying a prior change. Cap at ~5 minutes
+// total so we don't loop forever if the cluster is wedged.
+const concurrentUpdateRetrySchedule = Schedule.exponential("2 seconds").pipe(
+  Schedule.both(Schedule.recurs(60)),
+);
+
 const getKubernetesConnection = (
   state: Pick<
     Cluster["Attributes"],
@@ -515,22 +523,36 @@ export const ClusterProvider = () =>
             deletionProtection: state.deletionProtection,
           };
           if (clusterConfigChanged(observedAsProps, news)) {
-            const configUpdate = yield* eks.updateClusterConfig({
-              name: clusterName,
-              resourcesVpcConfig: news.resourcesVpcConfig,
-              logging: news.logging,
-              accessConfig: news.accessConfig
-                ? {
-                    authenticationMode: news.accessConfig.authenticationMode,
-                  }
-                : undefined,
-              upgradePolicy: news.upgradePolicy,
-              computeConfig: news.computeConfig,
-              kubernetesNetworkConfig: news.kubernetesNetworkConfig,
-              storageConfig: news.storageConfig,
-              deletionProtection: news.deletionProtection,
-              clientRequestToken: yield* toClientRequestToken(id, "config"),
-            });
+            // Tolerate `ResourceInUseException` as a transient — the control
+            // plane is mid-update from a prior reconcile or a peer. Retry
+            // bounded so we don't spin forever if the cluster is wedged.
+            // `InvalidRequestException` is intentionally NOT retried here:
+            // EKS uses it for both transient ("update in progress") and
+            // permanent ("invalid input") cases, and we don't want bad input
+            // to retry for 5 minutes.
+            const configUpdate = yield* eks
+              .updateClusterConfig({
+                name: clusterName,
+                resourcesVpcConfig: news.resourcesVpcConfig,
+                logging: news.logging,
+                accessConfig: news.accessConfig
+                  ? {
+                      authenticationMode: news.accessConfig.authenticationMode,
+                    }
+                  : undefined,
+                upgradePolicy: news.upgradePolicy,
+                computeConfig: news.computeConfig,
+                kubernetesNetworkConfig: news.kubernetesNetworkConfig,
+                storageConfig: news.storageConfig,
+                deletionProtection: news.deletionProtection,
+                clientRequestToken: yield* toClientRequestToken(id, "config"),
+              })
+              .pipe(
+                Effect.retry({
+                  while: (e) => e._tag === "ResourceInUseException",
+                  schedule: concurrentUpdateRetrySchedule,
+                }),
+              );
             if (configUpdate.update?.id) {
               yield* session.note(
                 `Updating EKS cluster config ${clusterName}...`,
@@ -546,11 +568,18 @@ export const ClusterProvider = () =>
 
           // Sync version — observed ↔ desired.
           if (news.version && state.version !== news.version) {
-            const versionUpdate = yield* eks.updateClusterVersion({
-              name: clusterName,
-              version: news.version,
-              clientRequestToken: yield* toClientRequestToken(id, "version"),
-            });
+            const versionUpdate = yield* eks
+              .updateClusterVersion({
+                name: clusterName,
+                version: news.version,
+                clientRequestToken: yield* toClientRequestToken(id, "version"),
+              })
+              .pipe(
+                Effect.retry({
+                  while: (e) => e._tag === "ResourceInUseException",
+                  schedule: concurrentUpdateRetrySchedule,
+                }),
+              );
             if (versionUpdate.update?.id) {
               yield* session.note(
                 `Updating EKS cluster version ${clusterName}...`,
@@ -617,14 +646,25 @@ export const ClusterProvider = () =>
           }
 
           if (output.deletionProtection) {
-            const disableDeletionProtection = yield* eks.updateClusterConfig({
-              name: output.clusterName,
-              deletionProtection: false,
-              clientRequestToken: yield* toClientRequestToken(
-                id,
-                "disable-deletion-protection",
-              ),
-            });
+            const disableDeletionProtection = yield* eks
+              .updateClusterConfig({
+                name: output.clusterName,
+                deletionProtection: false,
+                clientRequestToken: yield* toClientRequestToken(
+                  id,
+                  "disable-deletion-protection",
+                ),
+              })
+              .pipe(
+                Effect.retry({
+                  while: (e) => e._tag === "ResourceInUseException",
+                  schedule: concurrentUpdateRetrySchedule,
+                }),
+                // If the cluster is already gone, nothing to disable.
+                Effect.catchTag("ResourceNotFoundException", () =>
+                  Effect.succeed({ update: undefined }),
+                ),
+              );
             if (disableDeletionProtection.update?.id) {
               yield* waitForUpdate(
                 output.clusterName,
@@ -642,7 +682,11 @@ export const ClusterProvider = () =>
               name: output.clusterName,
             })
             .pipe(
+              // Already gone — nothing more to do.
               Effect.catchTag("ResourceNotFoundException", () => Effect.void),
+              // Cluster is already in DELETING state from a prior partial run
+              // — fall through to the wait-for-deleted polling below.
+              Effect.catchTag("ResourceInUseException", () => Effect.void),
             );
 
           yield* waitForClusterDeleted(output.clusterName);

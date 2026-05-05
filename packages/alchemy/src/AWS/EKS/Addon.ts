@@ -247,18 +247,32 @@ export const AddonProvider = () =>
             state.configurationValues !== news.configurationValues ||
             podIdentityChanged
           ) {
-            yield* eks.updateAddon({
-              clusterName,
-              addonName,
-              addonVersion: news.addonVersion,
-              serviceAccountRoleArn: news.serviceAccountRoleArn as
-                | string
-                | undefined,
-              resolveConflicts: news.resolveConflicts,
-              configurationValues: news.configurationValues,
-              podIdentityAssociations: news.podIdentityAssociations,
-              clientRequestToken: yield* toClientRequestToken(id, "update"),
-            });
+            // `ResourceInUseException` here means a prior update on this
+            // addon hasn't finished applying. Retry bounded — the addon
+            // controller usually settles in seconds. We do NOT retry
+            // `InvalidRequestException` because EKS reuses it for both
+            // transient and permanent failures.
+            yield* eks
+              .updateAddon({
+                clusterName,
+                addonName,
+                addonVersion: news.addonVersion,
+                serviceAccountRoleArn: news.serviceAccountRoleArn as
+                  | string
+                  | undefined,
+                resolveConflicts: news.resolveConflicts,
+                configurationValues: news.configurationValues,
+                podIdentityAssociations: news.podIdentityAssociations,
+                clientRequestToken: yield* toClientRequestToken(id, "update"),
+              })
+              .pipe(
+                Effect.retry({
+                  while: (e) => e._tag === "ResourceInUseException",
+                  schedule: Schedule.exponential("2 seconds").pipe(
+                    Schedule.both(Schedule.recurs(60)),
+                  ),
+                }),
+              );
             state = yield* waitForAddonActive({
               clusterName,
               addonName,
@@ -293,6 +307,7 @@ export const AddonProvider = () =>
               preserve: olds.preserveOnDelete,
             })
             .pipe(
+              // Already gone — nothing more to do.
               Effect.catchTag("ResourceNotFoundException", () => Effect.void),
             );
 
