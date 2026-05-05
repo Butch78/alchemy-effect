@@ -1,3 +1,4 @@
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Provider from "../Provider.ts";
 import { Resource } from "../Resource.ts";
@@ -102,10 +103,53 @@ export interface Variable extends Resource<
  */
 export const Variable = Resource<Variable>("GitHub.Variable");
 
+/** Variable was not found at the GitHub API (HTTP 404). */
+export class GitHubVariableNotFound extends Data.TaggedError(
+  "GitHubVariableNotFound",
+)<{
+  readonly owner: string;
+  readonly repository: string;
+  readonly name: string;
+  readonly cause?: unknown;
+}> {}
+
+/** GitHub returned 422 — typically the variable already exists on create. */
+export class GitHubVariableAlreadyExists extends Data.TaggedError(
+  "GitHubVariableAlreadyExists",
+)<{
+  readonly owner: string;
+  readonly repository: string;
+  readonly name: string;
+  readonly cause?: unknown;
+}> {}
+
+/** Catch-all for unrecognised Octokit errors. */
+export class GitHubVariableError extends Data.TaggedError(
+  "GitHubVariableError",
+)<{
+  readonly message: string;
+  readonly status?: number;
+  readonly cause?: unknown;
+}> {}
+
 const getOctokit = Effect.gen(function* () {
   const creds = yield* GitHubCredentials;
   return creds.octokit();
 });
+
+const mapOctokitError = (
+  e: unknown,
+  ctx: { owner: string; repository: string; name: string },
+) => {
+  const status = (e as { status?: number } | undefined)?.status;
+  const message =
+    (e as { message?: string } | undefined)?.message ?? String(e);
+  if (status === 404) return new GitHubVariableNotFound({ ...ctx, cause: e });
+  if (status === 422) {
+    return new GitHubVariableAlreadyExists({ ...ctx, cause: e });
+  }
+  return new GitHubVariableError({ message, status, cause: e });
+};
 
 export const VariableProvider = () =>
   Provider.succeed(Variable, {
@@ -113,69 +157,102 @@ export const VariableProvider = () =>
       const octokit = yield* getOctokit;
 
       // Observe — `name` is the path identifier for repo variables; ask
-      // GitHub directly for the live row. A 404 means it doesn't exist
-      // (deleted out-of-band, or never created), so we converge by
-      // creating it; otherwise we PATCH the value.
+      // GitHub directly for the live row. A typed `GitHubVariableNotFound`
+      // (404) collapses to "no live state" so we converge by creating;
+      // any other error surfaces.
       const observed = yield* Effect.tryPromise({
         try: async () => {
-          try {
-            const { data } = await octokit.rest.actions.getRepoVariable({
-              owner: news.owner,
-              repo: news.repository,
-              name: news.name,
-            });
-            return data;
-          } catch (error: any) {
-            if (error.status === 404) return undefined;
-            throw error;
-          }
-        },
-        catch: (e) => e as Error,
-      });
-
-      // Ensure — POST creates the variable.
-      if (observed === undefined) {
-        yield* Effect.tryPromise(() =>
-          octokit.rest.actions.createRepoVariable({
+          const { data } = await octokit.rest.actions.getRepoVariable({
             owner: news.owner,
             repo: news.repository,
             name: news.name,
-            value: news.value,
+          });
+          return data;
+        },
+        catch: (e) =>
+          mapOctokitError(e, {
+            owner: news.owner,
+            repository: news.repository,
+            name: news.name,
           }),
+      }).pipe(
+        Effect.catchTag("GitHubVariableNotFound", () => Effect.succeed(undefined)),
+      );
+
+      // Ensure — POST creates the variable. If a peer reconciler created
+      // the same variable between our observe and our create, GitHub
+      // returns 422; we catch that race and fall through to PATCH.
+      if (observed === undefined) {
+        const created = yield* Effect.tryPromise({
+          try: () =>
+            octokit.rest.actions.createRepoVariable({
+              owner: news.owner,
+              repo: news.repository,
+              name: news.name,
+              value: news.value,
+            }),
+          catch: (e) =>
+            mapOctokitError(e, {
+              owner: news.owner,
+              repository: news.repository,
+              name: news.name,
+            }),
+        }).pipe(
+          Effect.map(() => "created" as const),
+          Effect.catchTag("GitHubVariableAlreadyExists", () =>
+            Effect.succeed("race" as const),
+          ),
         );
+        if (created === "created") {
+          return { updatedAt: new Date().toISOString() };
+        }
+        // fall through to PATCH on the racy create
+      }
+
+      // Sync — PATCH the value. We always issue the call when we
+      // observed a live variable (so adoption converges value drift),
+      // and skip only the no-op redeploy where observe matched desired.
+      if (observed !== undefined && observed.value === news.value) {
         return { updatedAt: new Date().toISOString() };
       }
 
-      // Sync — PATCH the value if it drifted; skip the call when the
-      // observed value already matches to keep the API quiet.
-      if (observed.value !== news.value) {
-        yield* Effect.tryPromise(() =>
+      yield* Effect.tryPromise({
+        try: () =>
           octokit.rest.actions.updateRepoVariable({
             owner: news.owner,
             repo: news.repository,
             name: news.name,
             value: news.value,
           }),
-        );
-      }
+        catch: (e) =>
+          mapOctokitError(e, {
+            owner: news.owner,
+            repository: news.repository,
+            name: news.name,
+          }),
+      });
       return { updatedAt: new Date().toISOString() };
     }),
 
     delete: Effect.fn(function* ({ olds }) {
       const octokit = yield* getOctokit;
 
-      yield* Effect.tryPromise(async () => {
-        try {
-          await octokit.rest.actions.deleteRepoVariable({
+      yield* Effect.tryPromise({
+        try: () =>
+          octokit.rest.actions.deleteRepoVariable({
             owner: olds.owner,
             repo: olds.repository,
             name: olds.name,
-          });
-        } catch (error: any) {
-          if (error.status !== 404) {
-            throw error;
-          }
-        }
-      });
+          }),
+        catch: (e) =>
+          mapOctokitError(e, {
+            owner: olds.owner,
+            repository: olds.repository,
+            name: olds.name,
+          }),
+      }).pipe(
+        // Already gone is success — auth/throttling errors still surface.
+        Effect.catchTag("GitHubVariableNotFound", () => Effect.void),
+      );
     }),
   });
