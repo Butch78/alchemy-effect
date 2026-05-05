@@ -1,16 +1,24 @@
 import * as elbv2 from "@distilled.cloud/aws/elastic-load-balancing-v2";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { deepEqual, isResolved } from "../../Diff.ts";
 import type { Input } from "../../Input.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags, diffTags } from "../../Tags.ts";
+import {
+  createInternalTags,
+  diffTags,
+  hasAlchemyTags,
+} from "../../Tags.ts";
 import type { AccountID } from "../Environment.ts";
 import type { SecurityGroupId } from "../EC2/SecurityGroup.ts";
 import type { SubnetId } from "../EC2/Subnet.ts";
 import type { RegionID } from "../Region.ts";
+import * as Data from "effect/Data";
+import type { ScopedPlanStatusSession } from "../../Cli/Cli.ts";
 
 export type LoadBalancerName = string;
 export type LoadBalancerArn =
@@ -93,10 +101,12 @@ export const LoadBalancerProvider = () =>
             return { action: "replace" } as const;
           }
         }),
-        read: Effect.fn(function* ({ output }) {
+        read: Effect.fn(function* ({ id, output }) {
           if (!output) {
             return undefined;
           }
+          // Look up by ARN if we have it (faster, and survives deletion-and-
+          // recreate of a same-named LB).
           const described = yield* elbv2
             .describeLoadBalancers({
               LoadBalancerArns: [output.loadBalancerArn],
@@ -110,7 +120,12 @@ export const LoadBalancerProvider = () =>
           if (!loadBalancer?.LoadBalancerArn) {
             return undefined;
           }
-          return {
+          // Read tags from the cloud, not the cached output, so adoption
+          // sees the truth.
+          const observedTags = yield* fetchObservedTags(
+            loadBalancer.LoadBalancerArn,
+          );
+          const attrs = {
             ...output,
             dnsName: loadBalancer.DNSName!,
             canonicalHostedZoneId: loadBalancer.CanonicalHostedZoneId!,
@@ -122,7 +137,11 @@ export const LoadBalancerProvider = () =>
               loadBalancer.AvailabilityZones?.flatMap((zone) =>
                 zone.SubnetId ? [zone.SubnetId] : [],
               ) ?? [],
+            tags: observedTags,
           };
+          return (yield* hasAlchemyTags(id, observedTags))
+            ? attrs
+            : Unowned(attrs);
         }),
         reconcile: Effect.fn(function* ({ id, news, session }) {
           const name = yield* toName(id, news);
@@ -131,35 +150,37 @@ export const LoadBalancerProvider = () =>
             ...news.tags,
           };
 
-          // Observe — look up by deterministic name.
-          let described = yield* elbv2
-            .describeLoadBalancers({
-              Names: [name],
-            })
-            .pipe(
-              Effect.catchTag("LoadBalancerNotFoundException", () =>
-                Effect.succeed(undefined),
-              ),
-            );
-          let loadBalancer = described?.LoadBalancers?.[0];
+          // Observe — look up by deterministic name. `LoadBalancerNotFound`
+          // is the "doesn't exist yet" signal; nothing else is a race that
+          // we want to swallow.
+          let loadBalancer = yield* describeByName(name);
 
           // Ensure — create if missing. The replacement axes (scheme, type,
           // subnets, securityGroups, ipAddressType) are handled by diff so
-          // we don't need to deal with mismatches here.
+          // we don't need to deal with mismatches here. We tolerate
+          // `DuplicateLoadBalancerName` as a race with a peer reconciler:
+          // re-describe and continue.
           if (!loadBalancer?.LoadBalancerArn) {
-            const created = yield* elbv2.createLoadBalancer({
-              Name: name,
-              Scheme: news.scheme ?? "internet-facing",
-              Type: news.type ?? "application",
-              Subnets: news.subnets as string[],
-              SecurityGroups: news.securityGroups as string[] | undefined,
-              IpAddressType: news.ipAddressType,
-              Tags: Object.entries(desiredTags).map(([Key, Value]) => ({
-                Key,
-                Value,
-              })),
-            });
-            loadBalancer = created.LoadBalancers?.[0];
+            loadBalancer = yield* elbv2
+              .createLoadBalancer({
+                Name: name,
+                Scheme: news.scheme ?? "internet-facing",
+                Type: news.type ?? "application",
+                Subnets: news.subnets as string[],
+                SecurityGroups: news.securityGroups as string[] | undefined,
+                IpAddressType: news.ipAddressType,
+                Tags: Object.entries(desiredTags).map(([Key, Value]) => ({
+                  Key,
+                  Value,
+                })),
+              })
+              .pipe(
+                Effect.map((created) => created.LoadBalancers?.[0]),
+                Effect.catchTag(
+                  "DuplicateLoadBalancerNameException",
+                  () => describeByName(name),
+                ),
+              );
             if (!loadBalancer?.LoadBalancerArn) {
               return yield* Effect.die(
                 new Error("createLoadBalancer returned no load balancer"),
@@ -169,6 +190,15 @@ export const LoadBalancerProvider = () =>
 
           const loadBalancerArn =
             loadBalancer.LoadBalancerArn as LoadBalancerArn;
+
+          // Wait for `active` before mutating — `modifyLoadBalancerAttributes`
+          // and tag operations against an LB still in `provisioning` can
+          // race or fail with `OperationNotPermitted`. ALB provisioning
+          // typically completes in 30-60s; cap the wait at 5 minutes.
+          loadBalancer = yield* waitForLoadBalancerActive(
+            loadBalancerArn,
+            session,
+          );
 
           // Sync attributes — observed ↔ desired. We always apply when
           // desired attrs are non-empty; AWS rejects an empty list anyway,
@@ -187,17 +217,7 @@ export const LoadBalancerProvider = () =>
           }
 
           // Sync tags — diff observed cloud tags against desired.
-          const tagDescriptions = yield* elbv2.describeTags({
-            ResourceArns: [loadBalancerArn],
-          });
-          const observedTags = Object.fromEntries(
-            (tagDescriptions.TagDescriptions?.[0]?.Tags ?? [])
-              .filter(
-                (t): t is { Key: string; Value: string } =>
-                  typeof t.Key === "string" && typeof t.Value === "string",
-              )
-              .map((t) => [t.Key, t.Value]),
-          );
+          const observedTags = yield* fetchObservedTags(loadBalancerArn);
           const { removed, upsert } = diffTags(observedTags, desiredTags);
           if (upsert.length > 0) {
             yield* elbv2.addTags({
@@ -229,7 +249,12 @@ export const LoadBalancerProvider = () =>
             tags: desiredTags,
           };
         }),
-        delete: Effect.fn(function* ({ output }) {
+        delete: Effect.fn(function* ({ output, session }) {
+          // Tolerate the LB having already been deleted out-of-band, and
+          // ride out `ResourceInUse` (eventual-consistency: a listener or
+          // target-group attachment racing with us). Cap at 2 minutes so we
+          // surface persistent in-use failures (e.g. deletion protection
+          // enabled) instead of looping forever.
           yield* elbv2
             .deleteLoadBalancer({
               LoadBalancerArn: output.loadBalancerArn,
@@ -239,8 +264,103 @@ export const LoadBalancerProvider = () =>
                 "LoadBalancerNotFoundException",
                 () => Effect.void,
               ),
+              Effect.retry({
+                while: (e) => e._tag === "ResourceInUseException",
+                schedule: Schedule.fixed(5000).pipe(
+                  Schedule.both(Schedule.recurs(24)),
+                  Schedule.tapOutput(([, attempt]) =>
+                    session.note(
+                      `LoadBalancer in use, retrying delete... (${
+                        (attempt + 1) * 5
+                      }s)`,
+                    ),
+                  ),
+                ),
+              }),
             );
         }),
       };
     }),
   );
+
+class LoadBalancerNotActive extends Data.TaggedError("LoadBalancerNotActive")<{
+  arn: string;
+  state: string;
+}> {}
+
+const waitForLoadBalancerActive = (
+  loadBalancerArn: string,
+  session: ScopedPlanStatusSession,
+) =>
+  Effect.gen(function* () {
+    const result = yield* elbv2.describeLoadBalancers({
+      LoadBalancerArns: [loadBalancerArn],
+    });
+    const loadBalancer = result.LoadBalancers?.[0];
+    if (!loadBalancer) {
+      return yield* Effect.die(
+        new Error(
+          `LoadBalancer ${loadBalancerArn} disappeared while waiting for active state`,
+        ),
+      );
+    }
+    const state = loadBalancer.State?.Code ?? "unknown";
+    if (state === "active") {
+      return loadBalancer;
+    }
+    if (state === "failed") {
+      return yield* Effect.die(
+        new Error(
+          `LoadBalancer ${loadBalancerArn} entered failed state: ${
+            loadBalancer.State?.Reason ?? "no reason given"
+          }`,
+        ),
+      );
+    }
+    return yield* new LoadBalancerNotActive({ arn: loadBalancerArn, state });
+  }).pipe(
+    Effect.retry({
+      while: (e) => e instanceof LoadBalancerNotActive,
+      schedule: Schedule.fixed(5000).pipe(
+        Schedule.both(Schedule.recurs(60)), // up to 5 minutes
+        Schedule.tapOutput(([, attempt]) =>
+          session.note(
+            `Waiting for LoadBalancer to be active... (${(attempt + 1) * 5}s)`,
+          ),
+        ),
+      ),
+    }),
+  );
+
+const describeByName = (name: string) =>
+  elbv2
+    .describeLoadBalancers({ Names: [name] })
+    .pipe(
+      Effect.map((r) => r.LoadBalancers?.[0]),
+      Effect.catchTag("LoadBalancerNotFoundException", () =>
+        Effect.succeed(undefined),
+      ),
+    );
+
+const fetchObservedTags = (
+  loadBalancerArn: string,
+): Effect.Effect<Record<string, string>, any, any> =>
+  elbv2
+    .describeTags({ ResourceArns: [loadBalancerArn] })
+    .pipe(
+      Effect.map((r) =>
+        Object.fromEntries(
+          (r.TagDescriptions?.[0]?.Tags ?? [])
+            .filter(
+              (t): t is { Key: string; Value: string } =>
+                typeof t.Key === "string" && typeof t.Value === "string",
+            )
+            .map((t) => [t.Key, t.Value]),
+        ),
+      ),
+      // The LB can race away under us between the create and the tag fetch
+      // (rare, but possible in adoption flows). Treat that as "no tags".
+      Effect.catchTag("LoadBalancerNotFoundException", () =>
+        Effect.succeed({} as Record<string, string>),
+      ),
+    );

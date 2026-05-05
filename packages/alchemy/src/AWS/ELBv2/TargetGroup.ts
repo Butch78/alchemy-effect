@@ -1,5 +1,6 @@
 import * as elbv2 from "@distilled.cloud/aws/elastic-load-balancing-v2";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import { deepEqual, isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
@@ -215,12 +216,31 @@ export const TargetGroupProvider = () =>
             tags: desiredTags,
           };
         }),
-        delete: Effect.fn(function* ({ output }) {
+        delete: Effect.fn(function* ({ output, session }) {
+          // `deleteTargetGroup` is idempotent — AWS does not raise NotFound
+          // when the group is already gone. The one error we should ride
+          // out is `ResourceInUse` (a listener forward action still points
+          // here while it is being torn down). Cap at 2 minutes so we
+          // surface persistent in-use failures instead of looping forever.
           yield* elbv2
             .deleteTargetGroup({
               TargetGroupArn: output.targetGroupArn,
             })
-            .pipe(Effect.catch(() => Effect.void));
+            .pipe(
+              Effect.retry({
+                while: (e) => e._tag === "ResourceInUseException",
+                schedule: Schedule.fixed(5000).pipe(
+                  Schedule.both(Schedule.recurs(24)),
+                  Schedule.tapOutput(([, attempt]) =>
+                    session.note(
+                      `TargetGroup in use, retrying delete... (${
+                        (attempt + 1) * 5
+                      }s)`,
+                    ),
+                  ),
+                ),
+              }),
+            );
         }),
       };
     }),
