@@ -1,14 +1,19 @@
 import * as logs from "@distilled.cloud/aws/cloudwatch-logs";
 import { Region } from "@distilled.cloud/aws/Region";
 import * as Effect from "effect/Effect";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
-import type { Providers } from "../Providers.ts";
-import { createInternalTags, diffTags } from "../../Tags.ts";
+import {
+  createInternalTags,
+  diffTags,
+  hasAlchemyTags,
+} from "../../Tags.ts";
 import type { AccountID } from "../Environment.ts";
 import { AWSEnvironment } from "../Environment.ts";
+import type { Providers } from "../Providers.ts";
 import type { RegionID } from "../Region.ts";
 
 export type LogGroupName = string;
@@ -76,6 +81,17 @@ export const LogGroupProvider = () =>
           ? Effect.succeed(props.logGroupName)
           : createPhysicalName({ id, maxLength: 512 });
 
+      // `listTagsForResource` returns `Record<string, string | undefined>`;
+      // strip undefined values so downstream tag diffing stays typed.
+      const toStringTags = (response: {
+        tags?: { [key: string]: string | undefined };
+      }): Record<string, string> =>
+        Object.fromEntries(
+          Object.entries(response.tags ?? {}).filter(
+            (entry): entry is [string, string] => typeof entry[1] === "string",
+          ),
+        );
+
       return {
         stables: ["logGroupArn", "logGroupName"],
         diff: Effect.fn(function* ({ id, olds, news }) {
@@ -100,13 +116,27 @@ export const LogGroupProvider = () =>
           if (!match?.arn) {
             return undefined;
           }
-          return {
+          // Pull live tags so adoption can be gated on alchemy ownership tags
+          // — `output?.tags` is a stale local cache and may be empty when the
+          // engine is taking over a foreign group via `read`.
+          const observedTags = yield* logs
+            .listTagsForResource({ resourceArn: match.arn })
+            .pipe(
+              Effect.map(toStringTags),
+              Effect.catchTag("ResourceNotFoundException", () =>
+                Effect.succeed({} as Record<string, string>),
+              ),
+            );
+          const attrs = {
             logGroupName,
             logGroupArn: match.arn as LogGroupArn,
             retentionInDays: match.retentionInDays,
             kmsKeyId: match.kmsKeyId,
-            tags: output?.tags ?? {},
+            tags: observedTags,
           };
+          return (yield* hasAlchemyTags(id, observedTags))
+            ? attrs
+            : Unowned(attrs);
         }),
         reconcile: Effect.fn(function* ({ id, news, output, session }) {
           const logGroupName =
@@ -174,21 +204,42 @@ export const LogGroupProvider = () =>
             }
           }
 
+          // Sync KMS key — `kmsKeyId` is only honored on first-create when
+          // passed to `createLogGroup`. Subsequent changes (and out-of-band
+          // drift) require `associateKmsKey`/`disassociateKmsKey`. We diff
+          // against observed cloud state, not `olds`, so adoption converges
+          // even when the previous controller used a different key.
+          const observedKmsKeyId = observed?.kmsKeyId;
+          if (news.kmsKeyId !== observedKmsKeyId) {
+            if (news.kmsKeyId === undefined) {
+              yield* logs
+                .disassociateKmsKey({ logGroupName })
+                .pipe(
+                  Effect.catchTag(
+                    "ResourceNotFoundException",
+                    () => Effect.void,
+                  ),
+                );
+            } else {
+              yield* logs.associateKmsKey({
+                logGroupName,
+                kmsKeyId: news.kmsKeyId,
+              });
+            }
+          }
+
           // Sync tags — list observed tags then diff against desired so
-          // adoption rewrites ownership tags correctly.
+          // adoption rewrites ownership tags correctly. Only swallow
+          // `ResourceNotFoundException` (group raced away); auth/throttling
+          // errors must surface so we don't silently start with `{}` tags
+          // and rewrite the world.
           const observedTags = yield* logs
             .listTagsForResource({ resourceArn: arn })
             .pipe(
-              Effect.map(
-                (r): Record<string, string> =>
-                  Object.fromEntries(
-                    Object.entries(r.tags ?? {}).filter(
-                      (entry): entry is [string, string] =>
-                        typeof entry[1] === "string",
-                    ),
-                  ),
+              Effect.map(toStringTags),
+              Effect.catchTag("ResourceNotFoundException", () =>
+                Effect.succeed({} as Record<string, string>),
               ),
-              Effect.catch(() => Effect.succeed({} as Record<string, string>)),
             );
           const { removed, upsert } = diffTags(observedTags, desiredTags);
           if (upsert.length > 0) {
