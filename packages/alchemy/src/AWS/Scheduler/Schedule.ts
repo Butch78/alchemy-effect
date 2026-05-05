@@ -1,17 +1,13 @@
 import * as scheduler from "@distilled.cloud/aws/scheduler";
 import * as Effect from "effect/Effect";
+import * as Schedule_ from "effect/Schedule";
+import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import type { Input } from "../../Input.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import {
-  createInternalTags,
-  createTagsList,
-  diffTags,
-  hasTags,
-} from "../../Tags.ts";
 
 export interface ScheduleProps {
   /**
@@ -62,10 +58,6 @@ export interface ScheduleProps {
    * Action after a one-time schedule completes.
    */
   actionAfterCompletion?: string;
-  /**
-   * User-defined tags.
-   */
-  tags?: Record<string, string>;
 }
 
 /**
@@ -74,6 +66,12 @@ export interface ScheduleProps {
  * `Schedule` is the canonical time-based delivery primitive. High-level helpers
  * like `every`, `cron`, and `at` can synthesize the target role and scheduler
  * target configuration on top of this resource.
+ *
+ * EventBridge Scheduler does not support tagging individual schedules — only
+ * schedule groups. Ownership of a `Schedule` is therefore identified by its
+ * deterministic `(GroupName, Name)` tuple. Use a dedicated `ScheduleGroup` to
+ * isolate alchemy-managed schedules from foreign schedules sharing the same
+ * AWS account.
  *
  * @section Creating Schedules
  * @example Hourly Schedule
@@ -104,6 +102,18 @@ export interface Schedule extends Resource<
 > {}
 
 export const Schedule = Resource<Schedule>("AWS.Scheduler.Schedule");
+
+const conflictRetry = <A, E extends { _tag: string }, R>(
+  eff: Effect.Effect<A, E, R>,
+) =>
+  eff.pipe(
+    Effect.retry({
+      while: (e) => e._tag === "ConflictException",
+      schedule: Schedule_.spaced("2 seconds").pipe(
+        Schedule_.both(Schedule_.recurs(15)),
+      ),
+    }),
+  );
 
 export const ScheduleProvider = () =>
   Provider.effect(
@@ -148,12 +158,19 @@ export const ScheduleProvider = () =>
             return undefined;
           }
 
-          return {
+          const attrs = {
             scheduleArn: described.Arn,
             scheduleName: described.Name,
             groupName: described.GroupName ?? groupName,
             state: described.State,
           };
+
+          // EventBridge Scheduler does not support per-schedule tags, so
+          // ownership cannot be confirmed via tag presence. If the engine has
+          // never touched this schedule before (`output === undefined`),
+          // require explicit `--adopt`/`adopt(true)` before claiming it.
+          // Subsequent reconciles trust the persisted output and adopt.
+          return output === undefined ? Unowned(attrs) : attrs;
         }),
         reconcile: Effect.fn(function* ({ id, news, output, session }) {
           const scheduleName =
@@ -164,8 +181,6 @@ export const ScheduleProvider = () =>
             "default";
           const groupNameParam =
             groupName !== "default" ? groupName : undefined;
-          const internalTags = yield* createInternalTags(id);
-          const desiredTags = { ...internalTags, ...news.tags };
 
           const desiredConfig = {
             ScheduleExpression: news.scheduleExpression,
@@ -184,8 +199,10 @@ export const ScheduleProvider = () =>
             ActionAfterCompletion: news.actionAfterCompletion,
           };
 
-          // Observe — fetch live schedule.
-          let observed = yield* scheduler
+          // Observe — fetch live schedule. Cloud is authoritative; do not
+          // trust `output` blindly because the schedule could have been
+          // deleted out-of-band.
+          const observed = yield* scheduler
             .getSchedule({ Name: scheduleName, GroupName: groupNameParam })
             .pipe(
               Effect.catchTag("ResourceNotFoundException", () =>
@@ -193,110 +210,50 @@ export const ScheduleProvider = () =>
               ),
             );
 
-          // Ensure — create if missing. On `ConflictException` (race or
-          // adoption), verify ownership via internal tags then fall through
-          // to the sync path.
-          if (!observed?.Arn) {
-            yield* scheduler
-              .createSchedule({
-                Name: scheduleName,
-                GroupName: groupNameParam,
-                ...desiredConfig,
-              })
-              .pipe(
-                Effect.catchTag("ConflictException", () =>
-                  scheduler
-                    .getSchedule({
-                      Name: scheduleName,
-                      GroupName: groupNameParam,
-                    })
-                    .pipe(
-                      Effect.flatMap((existing) =>
-                        existing.Arn
-                          ? scheduler
-                              .listTagsForResource({
-                                ResourceArn: existing.Arn,
-                              })
-                              .pipe(
-                                Effect.filterOrFail(
-                                  ({ Tags }) => hasTags(internalTags, Tags),
-                                  () =>
-                                    new Error(
-                                      `Schedule '${scheduleName}' already exists and is not managed by alchemy`,
-                                    ),
-                                ),
-                                Effect.asVoid,
-                              )
-                          : Effect.fail(
-                              new Error(
-                                `Schedule '${scheduleName}' already exists but could not be described`,
-                              ),
-                            ),
-                      ),
-                    ),
-                ),
-              );
-            observed = yield* scheduler
-              .getSchedule({ Name: scheduleName, GroupName: groupNameParam })
-              .pipe(
-                Effect.catchTag("ResourceNotFoundException", () =>
-                  Effect.succeed(undefined),
-                ),
-              );
-          }
+          // Ensure / Sync — `createSchedule` and `updateSchedule` are both
+          // full PUTs, so a single full-config call lands the desired state
+          // either way. `ConflictException` from createSchedule is the AWS
+          // signal that the name is taken; if we already had `output` we
+          // know it's our schedule and fall through to update. From
+          // updateSchedule, `ConflictException` indicates a concurrent
+          // operation is in flight — bounded-retry rides it out.
+          const arn = observed?.Arn
+            ? yield* conflictRetry(
+                scheduler.updateSchedule({
+                  Name: scheduleName,
+                  GroupName: groupNameParam,
+                  ...desiredConfig,
+                }),
+              ).pipe(Effect.map((r) => r.ScheduleArn))
+            : yield* scheduler
+                .createSchedule({
+                  Name: scheduleName,
+                  GroupName: groupNameParam,
+                  ...desiredConfig,
+                })
+                .pipe(
+                  conflictRetry,
+                  Effect.map((r) => r.ScheduleArn),
+                );
 
-          if (!observed?.Arn) {
-            return yield* Effect.fail(
-              new Error(`Failed to read created Schedule '${scheduleName}'`),
-            );
-          }
+          yield* session.note(arn);
 
-          const scheduleArn = observed.Arn;
-
-          // Sync schedule configuration. Scheduler doesn't support a partial
-          // update — `updateSchedule` is a full PUT — so we always send the
-          // full desired config. Fields like `state` are reflected in
-          // `observed.State`; sending a no-op update is cheap.
-          yield* scheduler.updateSchedule({
-            Name: scheduleName,
-            GroupName: groupNameParam,
-            ...desiredConfig,
-          });
-
-          // Sync tags — diff observed cloud tags against desired so that
-          // adoption rewrites ownership tags correctly.
-          const observedTagsResp = yield* scheduler
-            .listTagsForResource({ ResourceArn: scheduleArn })
+          // Re-read final state so we return the cloud's authoritative State
+          // rather than the request value.
+          const finalState = yield* scheduler
+            .getSchedule({ Name: scheduleName, GroupName: groupNameParam })
             .pipe(
+              Effect.map((r) => r.State),
               Effect.catchTag("ResourceNotFoundException", () =>
-                Effect.succeed({ Tags: [] as scheduler.Tag[] }),
+                Effect.succeed(news.state),
               ),
             );
-          const observedTags = Object.fromEntries(
-            (observedTagsResp.Tags ?? []).map((t) => [t.Key, t.Value]),
-          );
-          const { removed, upsert } = diffTags(observedTags, desiredTags);
-
-          if (removed.length > 0) {
-            yield* scheduler.untagResource({
-              ResourceArn: scheduleArn,
-              TagKeys: removed,
-            });
-          }
-          if (upsert.length > 0) {
-            yield* scheduler.tagResource({
-              ResourceArn: scheduleArn,
-              Tags: upsert,
-            });
-          }
-
-          yield* session.note(scheduleArn);
 
           return {
-            scheduleArn,
+            scheduleArn: arn,
             scheduleName,
             groupName,
-            state: news.state ?? observed.State,
+            state: finalState,
           };
         }),
         delete: Effect.fn(function* ({ output }) {
@@ -307,6 +264,7 @@ export const ScheduleProvider = () =>
                 output.groupName !== "default" ? output.groupName : undefined,
             })
             .pipe(
+              conflictRetry,
               Effect.catchTag("ResourceNotFoundException", () => Effect.void),
             );
         }),
