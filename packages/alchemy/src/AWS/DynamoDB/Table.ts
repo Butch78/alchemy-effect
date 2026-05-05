@@ -667,7 +667,7 @@ export const TableProvider = () =>
           const table = response.Table;
           if (!table?.TableArn) {
             return yield* Effect.fail(
-              new Error(`Table ${tableName} not found`),
+              new TableUnreadable({ tableName, phase: "describe" }),
             );
           }
 
@@ -1052,10 +1052,42 @@ export const TableProvider = () =>
             state = yield* readTableState(tableName);
             if (!state) {
               return yield* Effect.fail(
-                new Error(`Failed to read created table ${tableName}`),
+                new TableUnreadable({ tableName, phase: "post-create" }),
               );
             }
+          } else if (state.table.TableStatus !== "ACTIVE") {
+            // We observed an existing table in a transient state
+            // (CREATING/UPDATING/DELETING). Mutations against a non-ACTIVE
+            // table fail with `ResourceInUseException`; wait first so the
+            // sync steps below have a stable target.
+            yield* session.note(
+              `Table ${tableName}: observed in ${state.table.TableStatus ?? "UNKNOWN"} state, waiting for ACTIVE before sync`,
+            );
+            yield* waitForTableActive(session, tableName);
+            const refreshed = yield* readTableState(tableName);
+            if (!refreshed) {
+              return yield* Effect.fail(
+                new TableUnreadable({ tableName, phase: "wait-active" }),
+              );
+            }
+            state = refreshed;
           }
+
+          // Each control-plane updateTable call below may race against
+          // background AWS work (a still-stabilizing GSI, a recent
+          // DescribeTable not yet propagated, or a transient 5xx). The
+          // bounded retry rides those out without masking real errors.
+          const retryControlPlaneUpdate = <A, E extends { _tag?: string }, R>(
+            effect: Effect.Effect<A, E, R>,
+          ) =>
+            effect.pipe(
+              Effect.retry({
+                while: isRetryableControlPlaneError,
+                schedule: Schedule.exponential(250).pipe(
+                  Schedule.both(Schedule.recurs(30)),
+                ),
+              }),
+            );
 
           // Sync stream specification — observed ↔ desired.
           //
@@ -1071,10 +1103,12 @@ export const TableProvider = () =>
               desiredStreamSpecification.StreamViewType;
 
           if (streamViewTypeChanged) {
-            yield* dynamodb.updateTable({
-              TableName: tableName,
-              StreamSpecification: { StreamEnabled: false },
-            });
+            yield* retryControlPlaneUpdate(
+              dynamodb.updateTable({
+                TableName: tableName,
+                StreamSpecification: { StreamEnabled: false },
+              }),
+            );
             yield* waitForTableActive(session, tableName);
           }
 
@@ -1087,12 +1121,14 @@ export const TableProvider = () =>
             yield* session.note(
               `Table ${tableName}: updating stream configuration`,
             );
-            yield* dynamodb.updateTable({
-              TableName: tableName,
-              StreamSpecification: desiredStreamSpecification ?? {
-                StreamEnabled: false,
-              },
-            });
+            yield* retryControlPlaneUpdate(
+              dynamodb.updateTable({
+                TableName: tableName,
+                StreamSpecification: desiredStreamSpecification ?? {
+                  StreamEnabled: false,
+                },
+              }),
+            );
             yield* waitForTableActive(session, tableName);
           }
 
@@ -1118,11 +1154,13 @@ export const TableProvider = () =>
             yield* session.note(
               `Table ${tableName}: applying GSI update (${action})`,
             );
-            yield* dynamodb.updateTable({
-              TableName: tableName,
-              AttributeDefinitions: toAttributeDefinitions(news.attributes),
-              GlobalSecondaryIndexUpdates: [globalSecondaryIndexUpdate],
-            });
+            yield* retryControlPlaneUpdate(
+              dynamodb.updateTable({
+                TableName: tableName,
+                AttributeDefinitions: toAttributeDefinitions(news.attributes),
+                GlobalSecondaryIndexUpdates: [globalSecondaryIndexUpdate],
+              }),
+            );
             yield* waitForTableActive(session, tableName);
           }
 
@@ -1178,17 +1216,19 @@ export const TableProvider = () =>
           );
 
           if (baseChanged) {
-            yield* dynamodb.updateTable({
-              TableName: tableName,
-              TableClass: news.tableClass,
-              AttributeDefinitions: toAttributeDefinitions(news.attributes),
-              BillingMode: desiredBillingMode,
-              SSESpecification: news.sseSpecification,
-              WarmThroughput: news.warmThroughput,
-              DeletionProtectionEnabled: news.deletionProtectionEnabled,
-              OnDemandThroughput: news.onDemandThroughput,
-              ProvisionedThroughput: news.provisionedThroughput,
-            });
+            yield* retryControlPlaneUpdate(
+              dynamodb.updateTable({
+                TableName: tableName,
+                TableClass: news.tableClass,
+                AttributeDefinitions: toAttributeDefinitions(news.attributes),
+                BillingMode: desiredBillingMode,
+                SSESpecification: news.sseSpecification,
+                WarmThroughput: news.warmThroughput,
+                DeletionProtectionEnabled: news.deletionProtectionEnabled,
+                OnDemandThroughput: news.onDemandThroughput,
+                ProvisionedThroughput: news.provisionedThroughput,
+              }),
+            );
             yield* waitForTableActive(session, tableName);
           }
 
@@ -1262,16 +1302,20 @@ export const TableProvider = () =>
           // converge ownership without fighting whatever was there before.
           const { removed, upsert } = diffTags(state.tags, desiredTags);
           if (removed.length > 0) {
-            yield* dynamodb.untagResource({
-              ResourceArn: state.table.TableArn!,
-              TagKeys: removed,
-            });
+            yield* retryControlPlaneUpdate(
+              dynamodb.untagResource({
+                ResourceArn: state.table.TableArn!,
+                TagKeys: removed,
+              }),
+            );
           }
           if (upsert.length > 0) {
-            yield* dynamodb.tagResource({
-              ResourceArn: state.table.TableArn!,
-              Tags: upsert,
-            });
+            yield* retryControlPlaneUpdate(
+              dynamodb.tagResource({
+                ResourceArn: state.table.TableArn!,
+                Tags: upsert,
+              }),
+            );
           }
 
           // Re-read final state after all sync steps so the returned
@@ -1279,7 +1323,7 @@ export const TableProvider = () =>
           const final = yield* readTableState(tableName);
           if (!final) {
             return yield* Effect.fail(
-              new Error(`Failed to read reconciled table ${tableName}`),
+              new TableUnreadable({ tableName, phase: "post-reconcile" }),
             );
           }
 
@@ -1367,6 +1411,11 @@ class TableNotActive extends Data.TaggedError("TableNotActive") {}
 class TableIndexesNotStable extends Data.TaggedError("TableIndexesNotStable") {}
 
 class TableStillDeleting extends Data.TaggedError("TableStillDeleting") {}
+
+class TableUnreadable extends Data.TaggedError("TableUnreadable")<{
+  tableName: string;
+  phase: "describe" | "post-create" | "post-reconcile" | "wait-active";
+}> {}
 
 class MissingStreamViewType extends Data.TaggedError("MissingStreamViewType") {}
 

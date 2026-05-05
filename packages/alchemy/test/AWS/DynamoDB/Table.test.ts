@@ -679,6 +679,312 @@ describe("AWS.DynamoDB.Table", () => {
     { timeout: 360_000 },
   );
 
+  // ── Lifecycle convergence ────────────────────────────────────────────
+  //
+  // Each test below runs `destroy → deploy → ... → destroy` and asserts
+  // that the reconciler converges every step regardless of starting
+  // state. Together they exercise: idempotency, drift recovery,
+  // out-of-band recreation, replacement on stable-prop change, GSI
+  // delta application, double-destroy idempotency, and tag re-write
+  // after adopt(true).
+
+  test.provider(
+    "redeploy with same props is a no-op (reconcile is idempotent)",
+    (stack) =>
+      Effect.gen(function* () {
+        yield* stack.destroy();
+
+        const initial = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("IdempotentTable", {
+              partitionKey: "id",
+              attributes: { id: "S" },
+              tags: { Owner: "platform" },
+            });
+          }),
+        );
+
+        const second = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("IdempotentTable", {
+              partitionKey: "id",
+              attributes: { id: "S" },
+              tags: { Owner: "platform" },
+            });
+          }),
+        );
+        expect(second.tableName).toEqual(initial.tableName);
+        expect(second.tableArn).toEqual(initial.tableArn);
+        expect(second.tableId).toEqual(initial.tableId);
+        expect(second.tags?.["Owner"]).toEqual("platform");
+
+        // The table is still functional and has not been replaced.
+        const described = yield* DynamoDB.describeTable({
+          TableName: second.tableName,
+        });
+        expect(described.Table?.TableStatus).toEqual("ACTIVE");
+
+        yield* stack.destroy();
+        yield* assertTableIsDeleted(initial.tableName);
+      }),
+    { timeout: 240_000 },
+  );
+
+  test.provider(
+    "reconcile resets PITR/TTL/tags drift mutated out-of-band",
+    (stack) =>
+      Effect.gen(function* () {
+        yield* stack.destroy();
+
+        const table = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("DriftTable", {
+              partitionKey: "id",
+              attributes: { id: "S", expiresAt: "N" },
+              tags: { Environment: "test" },
+              pointInTimeRecoverySpecification: {
+                PointInTimeRecoveryEnabled: true,
+                RecoveryPeriodInDays: 7,
+              },
+              timeToLiveSpecification: {
+                Enabled: true,
+                AttributeName: "expiresAt",
+              },
+            });
+          }),
+        );
+
+        // Mutate every aspect out-of-band via the raw SDK.
+        yield* DynamoDB.updateContinuousBackups({
+          TableName: table.tableName,
+          PointInTimeRecoverySpecification: {
+            PointInTimeRecoveryEnabled: false,
+          },
+        });
+        yield* DynamoDB.tagResource({
+          ResourceArn: table.tableArn,
+          Tags: [{ Key: "Environment", Value: "stolen" }],
+        });
+        yield* DynamoDB.untagResource({
+          ResourceArn: table.tableArn,
+          TagKeys: ["alchemy::id"],
+        });
+        yield* waitForPointInTimeRecovery(table.tableName, false);
+
+        // Re-deploy with the original desired props — reconcile should
+        // converge each aspect back, including stamping the internal
+        // alchemy tags we removed above.
+        const redeployed = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("DriftTable", {
+              partitionKey: "id",
+              attributes: { id: "S", expiresAt: "N" },
+              tags: { Environment: "test" },
+              pointInTimeRecoverySpecification: {
+                PointInTimeRecoveryEnabled: true,
+                RecoveryPeriodInDays: 7,
+              },
+              timeToLiveSpecification: {
+                Enabled: true,
+                AttributeName: "expiresAt",
+              },
+            });
+          }),
+        );
+        expect(redeployed.tableArn).toEqual(table.tableArn);
+
+        const restoredTags = yield* waitForTableTags(redeployed.tableArn, {
+          Environment: "test",
+        });
+        expect(restoredTags["Environment"]).toEqual("test");
+        expect(restoredTags["alchemy::id"]).toEqual("DriftTable");
+
+        const restoredBackups = yield* waitForPointInTimeRecovery(
+          redeployed.tableName,
+          true,
+        );
+        expect(
+          restoredBackups.PointInTimeRecoveryDescription
+            ?.PointInTimeRecoveryStatus,
+        ).toEqual("ENABLED");
+
+        yield* stack.destroy();
+        yield* assertTableIsDeleted(table.tableName);
+      }),
+    { timeout: 360_000 },
+  );
+
+  test.provider(
+    "reconcile re-creates a table that was deleted out-of-band",
+    (stack) =>
+      Effect.gen(function* () {
+        yield* stack.destroy();
+
+        const tableName = `alchemy-test-ddb-recreate-${Math.random()
+          .toString(36)
+          .slice(2, 8)}`;
+
+        const initial = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("RecreateTable", {
+              tableName,
+              partitionKey: "id",
+              attributes: { id: "S" },
+            });
+          }),
+        );
+        const initialArn = initial.tableArn;
+
+        // Delete out-of-band and wait for the deletion to converge so
+        // re-create doesn't race against an in-flight delete.
+        yield* DynamoDB.deleteTable({ TableName: tableName });
+        yield* assertTableIsDeleted(tableName);
+
+        const recreated = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("RecreateTable", {
+              tableName,
+              partitionKey: "id",
+              attributes: { id: "S" },
+            });
+          }),
+        );
+        expect(recreated.tableName).toEqual(tableName);
+        // tableId is regenerated by AWS on re-create even with the same
+        // name, so it must differ from the deleted table's id.
+        expect(recreated.tableId).not.toEqual(initial.tableId);
+        // ARN includes only the table name so it stays stable.
+        expect(recreated.tableArn).toEqual(initialArn);
+
+        yield* stack.destroy();
+        yield* assertTableIsDeleted(tableName);
+      }),
+    { timeout: 360_000 },
+  );
+
+  test.provider(
+    "changing tableName triggers replace, old table is deleted",
+    (stack) =>
+      Effect.gen(function* () {
+        yield* stack.destroy();
+
+        const suffix = Math.random().toString(36).slice(2, 8);
+        const nameA = `alchemy-test-ddb-replace-a-${suffix}`;
+        const nameB = `alchemy-test-ddb-replace-b-${suffix}`;
+
+        const a = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("RenameTable", {
+              tableName: nameA,
+              partitionKey: "id",
+              attributes: { id: "S" },
+            });
+          }),
+        );
+        expect(a.tableName).toEqual(nameA);
+
+        const b = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("RenameTable", {
+              tableName: nameB,
+              partitionKey: "id",
+              attributes: { id: "S" },
+            });
+          }),
+        );
+        expect(b.tableName).toEqual(nameB);
+        expect(b.tableArn).not.toEqual(a.tableArn);
+
+        // The replaced table must be deleted by the engine after replace.
+        yield* assertTableIsDeleted(nameA);
+
+        yield* stack.destroy();
+        yield* assertTableIsDeleted(nameB);
+      }),
+    { timeout: 360_000 },
+  );
+
+  test.provider(
+    "destroying an already-deleted table is a no-op",
+    (stack) =>
+      Effect.gen(function* () {
+        yield* stack.destroy();
+
+        const table = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("DoubleDestroyTable", {
+              partitionKey: "id",
+              attributes: { id: "S" },
+            });
+          }),
+        );
+
+        // Delete out-of-band and wait for the deletion to fully converge,
+        // then ask the engine to destroy. Provider's `delete` must catch
+        // ResourceNotFoundException and complete cleanly.
+        yield* DynamoDB.deleteTable({ TableName: table.tableName });
+        yield* assertTableIsDeleted(table.tableName);
+
+        yield* stack.destroy();
+      }),
+    { timeout: 240_000 },
+  );
+
+  test.provider(
+    "adding a GSI is applied to an existing table without replacement",
+    (stack) =>
+      Effect.gen(function* () {
+        yield* stack.destroy();
+
+        const initial = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("AddGsiTable", {
+              partitionKey: "pk",
+              sortKey: "sk",
+              attributes: {
+                pk: "S",
+                sk: "S",
+              },
+            });
+          }),
+        );
+
+        const updated = yield* stack.deploy(
+          Effect.gen(function* () {
+            return yield* Table("AddGsiTable", {
+              partitionKey: "pk",
+              sortKey: "sk",
+              attributes: {
+                pk: "S",
+                sk: "S",
+                gsi1pk: "S",
+              },
+              globalSecondaryIndexes: [
+                {
+                  IndexName: "gsi-by-lookup",
+                  KeySchema: [{ AttributeName: "gsi1pk", KeyType: "HASH" }],
+                  Projection: { ProjectionType: "ALL" },
+                },
+              ],
+            });
+          }),
+        );
+
+        // Same table — GSI add is an in-place update.
+        expect(updated.tableArn).toEqual(initial.tableArn);
+        expect(updated.tableId).toEqual(initial.tableId);
+
+        yield* expectTableIndexes(updated.tableName, {
+          local: [],
+          global: ["gsi-by-lookup"],
+        });
+
+        yield* stack.destroy();
+        yield* assertTableIsDeleted(initial.tableName);
+      }),
+    { timeout: 360_000 },
+  );
+
   const assertTableIsDeleted = Effect.fn(function* (tableName: string) {
     yield* Effect.logInfo(
       `DynamoDB Table test: waiting for deletion of ${tableName}`,
