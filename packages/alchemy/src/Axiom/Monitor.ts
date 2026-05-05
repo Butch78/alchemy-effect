@@ -117,9 +117,14 @@ export const MonitorProvider = () =>
             return yield* create(news);
           }
 
-          // Sync — the monitor exists; PATCH against its id with the
+          // Sync — the monitor exists; PUT against its id with the
           // desired props. `type` is replacement-only (handled in diff).
-          return yield* update({ ...news, id: observed.id });
+          // If the monitor disappeared between observe and update
+          // (deleted out-of-band mid-reconcile), recover by recreating
+          // instead of surfacing NotFound.
+          return yield* update({ ...news, id: observed.id }).pipe(
+            Effect.catchTag("NotFound", () => create(news)),
+          );
         }),
         delete: Effect.fn(function* ({ output }) {
           yield* del({ id: output.id }).pipe(
