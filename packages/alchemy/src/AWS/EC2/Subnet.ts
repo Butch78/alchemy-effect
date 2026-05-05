@@ -3,12 +3,19 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
+import { Unowned } from "../../AdoptPolicy.ts";
 import type { ScopedPlanStatusSession } from "../../Cli/Cli.ts";
 import { isResolved, somePropsAreDifferent } from "../../Diff.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import type { Providers } from "../Providers.ts";
-import { createInternalTags, createTagsList, diffTags } from "../../Tags.ts";
+import {
+  createAlchemyTagFilters,
+  createInternalTags,
+  createTagsList,
+  diffTags,
+  hasAlchemyTags,
+} from "../../Tags.ts";
 import type { AccountID } from "../Environment.ts";
 import type { RegionID } from "../Region.ts";
 import type { VpcId } from "./Vpc.ts";
@@ -206,6 +213,11 @@ export interface Subnet extends Resource<
       enableResourceNameDnsARecord?: boolean;
       enableResourceNameDnsAAAARecord?: boolean;
     };
+
+    /**
+     * The tags currently applied to the subnet.
+     */
+    tags?: Record<string, string>;
   },
   never,
   Providers
@@ -218,6 +230,36 @@ export const SubnetProvider = () =>
     Effect.gen(function* () {
       return {
         stables: ["subnetId", "subnetArn", "ownerId", "vpcId"],
+        // Observe a Subnet by alchemy tags. Subnet ids are auto-assigned, so
+        // we can't reconstruct the identifier from props — instead we filter
+        // `describeSubnets` by the internal tags `createInternalTags(id)`
+        // writes on every Subnet we manage. If a Subnet was created out of
+        // band (no alchemy tags) the filter returns nothing and we surface
+        // `undefined` rather than guessing.
+        read: Effect.fn(function* ({ id, output }) {
+          let subnet: ec2.Subnet | undefined;
+          if (output?.subnetId) {
+            const lookup = yield* ec2
+              .describeSubnets({ SubnetIds: [output.subnetId] })
+              .pipe(
+                Effect.catchTag("InvalidSubnetID.NotFound", () =>
+                  Effect.succeed({ Subnets: [] }),
+                ),
+              );
+            subnet = lookup.Subnets?.[0];
+          }
+          if (!subnet) {
+            const filters = yield* createAlchemyTagFilters(id);
+            const lookup = yield* ec2.describeSubnets({ Filters: filters });
+            subnet = lookup.Subnets?.[0];
+          }
+          if (!subnet) return undefined;
+          const tags = Object.fromEntries(
+            (subnet.Tags ?? []).map((t) => [t.Key!, t.Value!]),
+          ) as Record<string, string>;
+          const attrs = toSubnetAttrs(subnet, tags);
+          return (yield* hasAlchemyTags(id, tags)) ? attrs : Unowned(attrs);
+        }),
         diff: Effect.fn(function* ({ news, olds }) {
           if (!isResolved(news)) return;
           if (
@@ -239,8 +281,9 @@ export const SubnetProvider = () =>
           const alchemyTags = yield* createInternalTags(id);
           const desiredTags = { ...alchemyTags, ...(news.tags ?? {}) };
 
-          // Observe — find the subnet via cached id, else fall through to
-          // create.
+          // Observe — find the subnet via cached id, else by alchemy tags so
+          // an interrupted previous run (state lost after createSubnet but
+          // before persistence) recovers without leaking a duplicate.
           let subnet: ec2.Subnet | undefined;
           if (output?.subnetId) {
             const lookup = yield* ec2
@@ -250,6 +293,11 @@ export const SubnetProvider = () =>
                   Effect.succeed({ Subnets: [] }),
                 ),
               );
+            subnet = lookup.Subnets?.[0];
+          }
+          if (!subnet) {
+            const filters = yield* createAlchemyTagFilters(id);
+            const lookup = yield* ec2.describeSubnets({ Filters: filters });
             subnet = lookup.Subnets?.[0];
           }
 
@@ -276,9 +324,15 @@ export const SubnetProvider = () =>
                 DryRun: false,
               })
               .pipe(
+                // VPC reads are eventually consistent — when a fresh VPC is
+                // created in the same plan the propagation delay can surface
+                // as `InvalidVpcID.NotFound` here. Bound the wait so a
+                // genuinely-missing VPC still surfaces as a failure.
                 Effect.retry({
                   while: (e) => e._tag === "InvalidVpcID.NotFound",
-                  schedule: Schedule.exponential(100),
+                  schedule: Schedule.fixed(1000).pipe(
+                    Schedule.both(Schedule.recurs(15)),
+                  ),
                 }),
               );
             const newSubnetId = createResult.Subnet!.SubnetId! as SubnetId;
@@ -289,13 +343,19 @@ export const SubnetProvider = () =>
           const subnetId = subnet.SubnetId! as SubnetId;
 
           // Sync subnet attributes — diff observed cloud state against desired
-          // and only call modifySubnetAttribute on real drift.
+          // and only call modifySubnetAttribute on real drift. Each call is
+          // wrapped in `retryEventuallyConsistent` because EC2 may briefly
+          // return `InvalidSubnetID.NotFound` immediately after createSubnet
+          // even though `waitForSubnetAvailable` has reported the subnet as
+          // `available`.
           const desiredMapPublicIp = news.mapPublicIpOnLaunch ?? false;
           if ((subnet.MapPublicIpOnLaunch ?? false) !== desiredMapPublicIp) {
-            yield* ec2.modifySubnetAttribute({
-              SubnetId: subnetId,
-              MapPublicIpOnLaunch: { Value: desiredMapPublicIp },
-            });
+            yield* ec2
+              .modifySubnetAttribute({
+                SubnetId: subnetId,
+                MapPublicIpOnLaunch: { Value: desiredMapPublicIp },
+              })
+              .pipe(retryEventuallyConsistent);
             yield* session.note(
               `Updated map public IP on launch: ${desiredMapPublicIp}`,
             );
@@ -305,10 +365,12 @@ export const SubnetProvider = () =>
           if (
             (subnet.AssignIpv6AddressOnCreation ?? false) !== desiredAssignIpv6
           ) {
-            yield* ec2.modifySubnetAttribute({
-              SubnetId: subnetId,
-              AssignIpv6AddressOnCreation: { Value: desiredAssignIpv6 },
-            });
+            yield* ec2
+              .modifySubnetAttribute({
+                SubnetId: subnetId,
+                AssignIpv6AddressOnCreation: { Value: desiredAssignIpv6 },
+              })
+              .pipe(retryEventuallyConsistent);
             yield* session.note(
               `Updated assign IPv6 address on creation: ${desiredAssignIpv6}`,
             );
@@ -316,10 +378,12 @@ export const SubnetProvider = () =>
 
           const desiredEnableDns64 = news.enableDns64 ?? false;
           if ((subnet.EnableDns64 ?? false) !== desiredEnableDns64) {
-            yield* ec2.modifySubnetAttribute({
-              SubnetId: subnetId,
-              EnableDns64: { Value: desiredEnableDns64 },
-            });
+            yield* ec2
+              .modifySubnetAttribute({
+                SubnetId: subnetId,
+                EnableDns64: { Value: desiredEnableDns64 },
+              })
+              .pipe(retryEventuallyConsistent);
             yield* session.note(`Updated DNS64 setting: ${desiredEnableDns64}`);
           }
 
@@ -340,91 +404,63 @@ export const SubnetProvider = () =>
               news.enableResourceNameDnsAAAARecordOnLaunch !== undefined ||
               news.hostnameType !== undefined
             ) {
-              yield* ec2.modifySubnetAttribute({
-                SubnetId: subnetId,
-                PrivateDnsHostnameTypeOnLaunch: news.hostnameType,
-                EnableResourceNameDnsARecordOnLaunch:
-                  news.enableResourceNameDnsARecordOnLaunch !== undefined
-                    ? { Value: news.enableResourceNameDnsARecordOnLaunch }
-                    : undefined,
-                EnableResourceNameDnsAAAARecordOnLaunch:
-                  news.enableResourceNameDnsAAAARecordOnLaunch !== undefined
-                    ? { Value: news.enableResourceNameDnsAAAARecordOnLaunch }
-                    : undefined,
-              });
+              yield* ec2
+                .modifySubnetAttribute({
+                  SubnetId: subnetId,
+                  PrivateDnsHostnameTypeOnLaunch: news.hostnameType,
+                  EnableResourceNameDnsARecordOnLaunch:
+                    news.enableResourceNameDnsARecordOnLaunch !== undefined
+                      ? { Value: news.enableResourceNameDnsARecordOnLaunch }
+                      : undefined,
+                  EnableResourceNameDnsAAAARecordOnLaunch:
+                    news.enableResourceNameDnsAAAARecordOnLaunch !== undefined
+                      ? { Value: news.enableResourceNameDnsAAAARecordOnLaunch }
+                      : undefined,
+                })
+                .pipe(retryEventuallyConsistent);
               yield* session.note("Updated private DNS hostname settings");
             }
           }
 
-          // Sync tags — observed cloud tags vs desired.
+          // Sync tags — observed cloud tags vs desired. Foreign-tagged
+          // takeovers (adopt(true)) come through here with `subnet.Tags` not
+          // matching what we last persisted, so this diff is what re-brands
+          // the subnet on adoption.
           const currentTags = Object.fromEntries(
             (subnet.Tags ?? []).map((t) => [t.Key!, t.Value!]),
           ) as Record<string, string>;
           const { removed, upsert } = diffTags(currentTags, desiredTags);
           if (removed.length > 0) {
-            yield* ec2.deleteTags({
-              Resources: [subnetId],
-              Tags: removed.map((key) => ({ Key: key })),
-              DryRun: false,
-            });
+            yield* ec2
+              .deleteTags({
+                Resources: [subnetId],
+                Tags: removed.map((key) => ({ Key: key })),
+                DryRun: false,
+              })
+              .pipe(retryEventuallyConsistent);
           }
           if (upsert.length > 0) {
-            yield* ec2.createTags({
-              Resources: [subnetId],
-              Tags: upsert,
-              DryRun: false,
-            });
+            yield* ec2
+              .createTags({
+                Resources: [subnetId],
+                Tags: upsert,
+                DryRun: false,
+              })
+              .pipe(retryEventuallyConsistent);
           }
 
           // Re-read final state.
-          const finalLookup = yield* ec2.describeSubnets({
-            SubnetIds: [subnetId],
-          });
+          const finalLookup = yield* ec2
+            .describeSubnets({ SubnetIds: [subnetId] })
+            .pipe(retryEventuallyConsistent);
           const final = finalLookup.Subnets?.[0];
           if (!final) {
-            return yield* Effect.fail(
-              new Error(`Subnet ${subnetId} disappeared during reconcile`),
-            );
+            return yield* new SubnetDisappeared({ subnetId });
           }
-          return {
-            subnetId,
-            subnetArn: final.SubnetArn! as SubnetArn,
-            cidrBlock: final.CidrBlock!,
-            vpcId: news.vpcId,
-            availabilityZone: final.AvailabilityZone!,
-            availabilityZoneId: final.AvailabilityZoneId,
-            state: final.State!,
-            availableIpAddressCount: final.AvailableIpAddressCount ?? 0,
-            mapPublicIpOnLaunch: final.MapPublicIpOnLaunch ?? false,
-            assignIpv6AddressOnCreation:
-              final.AssignIpv6AddressOnCreation ?? false,
-            defaultForAz: final.DefaultForAz ?? false,
-            ownerId: final.OwnerId,
-            ipv6CidrBlockAssociationSet: final.Ipv6CidrBlockAssociationSet?.map(
-              (assoc) => ({
-                associationId: assoc.AssociationId!,
-                ipv6CidrBlock: assoc.Ipv6CidrBlock!,
-                ipv6CidrBlockState: {
-                  state: assoc.Ipv6CidrBlockState!.State!,
-                  statusMessage: assoc.Ipv6CidrBlockState!.StatusMessage,
-                },
-              }),
-            ),
-            enableDns64: final.EnableDns64,
-            ipv6Native: final.Ipv6Native,
-            privateDnsNameOptionsOnLaunch: final.PrivateDnsNameOptionsOnLaunch
-              ? {
-                  hostnameType:
-                    final.PrivateDnsNameOptionsOnLaunch.HostnameType,
-                  enableResourceNameDnsARecord:
-                    final.PrivateDnsNameOptionsOnLaunch
-                      .EnableResourceNameDnsARecord,
-                  enableResourceNameDnsAAAARecord:
-                    final.PrivateDnsNameOptionsOnLaunch
-                      .EnableResourceNameDnsAAAARecord,
-                }
-              : undefined,
-          };
+          const finalTags = Object.fromEntries(
+            (final.Tags ?? []).map((t) => [t.Key!, t.Value!]),
+          ) as Record<string, string>;
+          return toSubnetAttrs(final, finalTags);
         }),
 
         delete: Effect.fn(function* ({ output, session }) {
@@ -432,34 +468,31 @@ export const SubnetProvider = () =>
 
           yield* session.note(`Deleting subnet: ${subnetId}`);
 
-          // 1. Attempt to delete subnet
+          // Attempt to delete the subnet. If it's already gone, that's a
+          // no-op. DependencyViolation means ENIs / RouteTableAssociations /
+          // running instances are still being torn down; bound the wait at
+          // ~5 minutes to match VPC.
           yield* ec2
             .deleteSubnet({
               SubnetId: subnetId,
               DryRun: false,
             })
             .pipe(
-              Effect.tapError(Effect.logDebug),
-              Effect.catchTag("InvalidSubnetID.NotFound", () => Effect.void),
-              // Retry on dependency violations (resources still being deleted)
               Effect.retry({
-                while: (e) => {
-                  // DependencyViolation means there are still dependent resources
-                  // This can happen if ENIs/instances are being deleted concurrently
-                  return e._tag === "DependencyViolation";
-                },
-                schedule: Schedule.exponential(1000, 1.5).pipe(
-                  Schedule.both(Schedule.recurs(10)), // Try up to 10 times
+                while: (e) => e._tag === "DependencyViolation",
+                schedule: Schedule.fixed(5000).pipe(
+                  Schedule.both(Schedule.recurs(60)),
                   Schedule.tapOutput(([, attempt]) =>
                     session.note(
-                      `Waiting for dependencies to clear... (attempt ${attempt + 1})`,
+                      `Waiting for subnet dependencies to clear... (attempt ${attempt + 1})`,
                     ),
                   ),
                 ),
               }),
+              Effect.catchTag("InvalidSubnetID.NotFound", () => Effect.void),
             );
 
-          // 2. Wait for subnet to be fully deleted
+          // Wait for the deletion to propagate.
           yield* waitForSubnetDeleted(subnetId, session);
 
           yield* session.note(`Subnet ${subnetId} deleted successfully`);
@@ -479,26 +512,106 @@ class SubnetStillExists extends Data.TaggedError("SubnetStillExists")<{
   subnetId: string;
 }> {}
 
+// Tagged failure for the rare case where a Subnet vanishes mid-reconcile
+// (e.g. it was deleted out of band between createSubnet and the final read).
+class SubnetDisappeared extends Data.TaggedError("SubnetDisappeared")<{
+  subnetId: string;
+}> {}
+
 /**
- * Wait for subnet to be in available state
+ * Pipe an EC2 effect through a bounded retry that rides out post-create
+ * eventual-consistency `InvalidSubnetID.NotFound`. The general AWS retry
+ * layer doesn't ride this out because distilled doesn't tag it as
+ * retryable — but we know it's transient when we have just created the
+ * subnet ourselves.
+ */
+const retryEventuallyConsistent = <A, E, R>(
+  self: Effect.Effect<A, E, R>,
+): Effect.Effect<A, Exclude<E, { _tag: "InvalidSubnetID.NotFound" }>, R> =>
+  self.pipe(
+    Effect.retry({
+      while: (e: any) => e?._tag === "InvalidSubnetID.NotFound",
+      schedule: Schedule.fixed(1000).pipe(Schedule.both(Schedule.recurs(15))),
+    }),
+  ) as Effect.Effect<
+    A,
+    Exclude<E, { _tag: "InvalidSubnetID.NotFound" }>,
+    R
+  >;
+
+/**
+ * Project a `describeSubnets` result row to the public Attributes shape.
+ * Used by `read` and the final read inside `reconcile` to produce
+ * identically-shaped output.
+ */
+const toSubnetAttrs = (
+  subnet: ec2.Subnet,
+  tags: Record<string, string>,
+): Subnet["Attributes"] => ({
+  subnetId: subnet.SubnetId! as SubnetId,
+  subnetArn: subnet.SubnetArn! as SubnetArn,
+  cidrBlock: subnet.CidrBlock!,
+  vpcId: subnet.VpcId! as VpcId,
+  availabilityZone: subnet.AvailabilityZone!,
+  availabilityZoneId: subnet.AvailabilityZoneId,
+  state: subnet.State!,
+  availableIpAddressCount: subnet.AvailableIpAddressCount ?? 0,
+  mapPublicIpOnLaunch: subnet.MapPublicIpOnLaunch ?? false,
+  assignIpv6AddressOnCreation: subnet.AssignIpv6AddressOnCreation ?? false,
+  defaultForAz: subnet.DefaultForAz ?? false,
+  ownerId: subnet.OwnerId,
+  ipv6CidrBlockAssociationSet: subnet.Ipv6CidrBlockAssociationSet?.map(
+    (assoc) => ({
+      associationId: assoc.AssociationId!,
+      ipv6CidrBlock: assoc.Ipv6CidrBlock!,
+      ipv6CidrBlockState: {
+        state: assoc.Ipv6CidrBlockState!.State!,
+        statusMessage: assoc.Ipv6CidrBlockState!.StatusMessage,
+      },
+    }),
+  ),
+  enableDns64: subnet.EnableDns64,
+  ipv6Native: subnet.Ipv6Native,
+  privateDnsNameOptionsOnLaunch: subnet.PrivateDnsNameOptionsOnLaunch
+    ? {
+        hostnameType: subnet.PrivateDnsNameOptionsOnLaunch.HostnameType,
+        enableResourceNameDnsARecord:
+          subnet.PrivateDnsNameOptionsOnLaunch.EnableResourceNameDnsARecord,
+        enableResourceNameDnsAAAARecord:
+          subnet.PrivateDnsNameOptionsOnLaunch.EnableResourceNameDnsAAAARecord,
+      }
+    : undefined,
+  tags,
+});
+
+/**
+ * Wait for subnet to be in `available` state. EC2 is eventually consistent,
+ * so `describeSubnets` immediately after `createSubnet` may briefly return
+ * `InvalidSubnetID.NotFound` — treat that as "still pending" instead of
+ * failing.
  */
 const waitForSubnetAvailable = (
   subnetId: string,
   session?: ScopedPlanStatusSession,
 ) =>
   Effect.gen(function* () {
-    const result = yield* ec2.describeSubnets({ SubnetIds: [subnetId] });
+    const result = yield* ec2
+      .describeSubnets({ SubnetIds: [subnetId] })
+      .pipe(
+        Effect.catchTag("InvalidSubnetID.NotFound", () =>
+          Effect.succeed({ Subnets: [] as ec2.Subnet[] }),
+        ),
+      );
     const subnet = result.Subnets?.[0];
 
     if (!subnet) {
-      return yield* Effect.fail(new Error(`Subnet ${subnetId} not found`));
+      return yield* new SubnetPending({ subnetId, state: "missing" });
     }
 
     if (subnet.State === "available") {
       return subnet;
     }
 
-    // Still pending - this is the only retryable case
     return yield* new SubnetPending({ subnetId, state: subnet.State! });
   }).pipe(
     Effect.retry({
