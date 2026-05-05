@@ -99,10 +99,18 @@ export const NotifierProvider = () =>
             return { ...result, id: result.id ?? "" };
           }
 
-          // Sync — the notifier exists; PATCH against its id with the
+          // Sync — the notifier exists; PUT against its id with the
           // desired props. Preserve the cached id if the API response
-          // omits it.
-          const result = yield* update({ ...news, id: observed.id! });
+          // omits it. If the notifier disappeared between observe and
+          // update (deleted out-of-band mid-reconcile), recover by
+          // recreating instead of surfacing NotFound.
+          const result = yield* update({ ...news, id: observed.id! }).pipe(
+            Effect.catchTag("NotFound", () =>
+              create(news).pipe(
+                Effect.map((r) => ({ ...r, id: r.id ?? "" })),
+              ),
+            ),
+          );
           return { ...result, id: result.id ?? observed.id! };
         }),
         delete: Effect.fn(function* ({ output }) {
