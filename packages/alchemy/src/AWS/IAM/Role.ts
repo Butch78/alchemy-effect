@@ -1,5 +1,6 @@
 import * as iam from "@distilled.cloud/aws/iam";
 import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 import { Unowned } from "../../AdoptPolicy.ts";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
@@ -20,6 +21,53 @@ import {
   stringifyPolicyDocument,
   toTagRecord,
 } from "./common.ts";
+
+/**
+ * IAM control-plane errors that are safe to retry. `ConcurrentModification`
+ * is documented as transient — IAM serializes mutations to a role and
+ * surfaces this when two writes overlap. `EntityTemporarilyUnmodifiable`
+ * appears during cross-region propagation right after a `createRole`.
+ */
+const isRetryableIamControlPlaneError = (error: { _tag?: string }) =>
+  error._tag === "ConcurrentModificationException" ||
+  error._tag === "EntityTemporarilyUnmodifiableException";
+
+/**
+ * Retry an IAM mutation against `ConcurrentModification` /
+ * `EntityTemporarilyUnmodifiable`. Capped so a service that stays in this
+ * state surfaces instead of looping forever.
+ */
+const retryIamMutation = <A, E extends { _tag?: string }, R>(
+  effect: Effect.Effect<A, E, R>,
+) =>
+  effect.pipe(
+    Effect.retry({
+      while: isRetryableIamControlPlaneError,
+      schedule: Schedule.exponential(250).pipe(
+        Schedule.both(Schedule.recurs(20)),
+      ),
+    }),
+  );
+
+/**
+ * IAM is eventually consistent globally. Right after `createRole` the
+ * subsequent attach/put/tag calls can briefly hit `NoSuchEntity` because
+ * they land on an IAM host that hasn't seen the create yet. Retry that
+ * narrow window with a short bounded schedule.
+ */
+const retryNoSuchEntityAfterCreate = <A, E extends { _tag?: string }, R>(
+  effect: Effect.Effect<A, E, R>,
+) =>
+  effect.pipe(
+    Effect.retry({
+      while: (e) =>
+        e._tag === "NoSuchEntityException" ||
+        isRetryableIamControlPlaneError(e),
+      schedule: Schedule.exponential(500).pipe(
+        Schedule.both(Schedule.recurs(8)),
+      ),
+    }),
+  );
 
 export type RoleName = string;
 export type RoleArn = `arn:aws:iam::${AccountID}:role/${RoleName}`;
@@ -170,33 +218,38 @@ export const RoleProvider = () =>
         roleName,
         olds,
         news,
+        justCreated,
       }: {
         roleName: string;
         olds: string[];
         news: string[];
+        justCreated: boolean;
       }) {
         const oldSet = new Set(olds);
         const newSet = new Set(news);
 
         for (const policyArn of news) {
           if (!oldSet.has(policyArn)) {
-            yield* iam.attachRolePolicy({
+            const attach = iam.attachRolePolicy({
               RoleName: roleName,
               PolicyArn: policyArn,
             });
+            yield* justCreated
+              ? retryNoSuchEntityAfterCreate(attach)
+              : retryIamMutation(attach);
           }
         }
 
         for (const policyArn of olds) {
           if (!newSet.has(policyArn)) {
-            yield* iam
-              .detachRolePolicy({
+            yield* retryIamMutation(
+              iam.detachRolePolicy({
                 RoleName: roleName,
                 PolicyArn: policyArn,
-              })
-              .pipe(
-                Effect.catchTag("NoSuchEntityException", () => Effect.void),
-              );
+              }),
+            ).pipe(
+              Effect.catchTag("NoSuchEntityException", () => Effect.void),
+            );
           }
         }
       });
@@ -205,34 +258,39 @@ export const RoleProvider = () =>
         roleName,
         olds,
         news,
+        justCreated,
       }: {
         roleName: string;
         olds: Record<string, PolicyDocument>;
         news: Record<string, PolicyDocument>;
+        justCreated: boolean;
       }) {
         for (const [policyName, document] of Object.entries(news)) {
           if (
             JSON.stringify(olds[policyName] ?? null) !==
             JSON.stringify(document)
           ) {
-            yield* iam.putRolePolicy({
+            const put = iam.putRolePolicy({
               RoleName: roleName,
               PolicyName: policyName,
               PolicyDocument: stringifyPolicyDocument(document),
             });
+            yield* justCreated
+              ? retryNoSuchEntityAfterCreate(put)
+              : retryIamMutation(put);
           }
         }
 
         for (const policyName of Object.keys(olds)) {
           if (!(policyName in news)) {
-            yield* iam
-              .deleteRolePolicy({
+            yield* retryIamMutation(
+              iam.deleteRolePolicy({
                 RoleName: roleName,
                 PolicyName: policyName,
-              })
-              .pipe(
-                Effect.catchTag("NoSuchEntityException", () => Effect.void),
-              );
+              }),
+            ).pipe(
+              Effect.catchTag("NoSuchEntityException", () => Effect.void),
+            );
           }
         }
       });
@@ -317,6 +375,7 @@ export const RoleProvider = () =>
           // Ensure — create the role when missing. A peer reconciler may
           // have created it concurrently; tolerate that race by reading
           // the existing role.
+          let justCreated = false;
           if (!observedRole?.Role) {
             observedRole = yield* iam
               .createRole({
@@ -335,6 +394,7 @@ export const RoleProvider = () =>
                   iam.getRole({ RoleName: roleName }),
                 ),
               );
+            justCreated = true;
           }
 
           const observedAssumePolicy = parsePolicyDocument(
@@ -352,12 +412,14 @@ export const RoleProvider = () =>
             JSON.stringify(observedAssumePolicy ?? null) !==
             JSON.stringify(news.assumeRolePolicyDocument)
           ) {
-            yield* iam.updateAssumeRolePolicy({
-              RoleName: roleName,
-              PolicyDocument: stringifyPolicyDocument(
-                news.assumeRolePolicyDocument,
-              ),
-            });
+            yield* retryIamMutation(
+              iam.updateAssumeRolePolicy({
+                RoleName: roleName,
+                PolicyDocument: stringifyPolicyDocument(
+                  news.assumeRolePolicyDocument,
+                ),
+              }),
+            );
           }
 
           // Sync description / maxSessionDuration via updateRole.
@@ -365,29 +427,33 @@ export const RoleProvider = () =>
             observedDescription !== news.description ||
             observedMaxSessionDuration !== news.maxSessionDuration
           ) {
-            yield* iam.updateRole({
-              RoleName: roleName,
-              Description: news.description,
-              MaxSessionDuration: news.maxSessionDuration,
-            });
+            yield* retryIamMutation(
+              iam.updateRole({
+                RoleName: roleName,
+                Description: news.description,
+                MaxSessionDuration: news.maxSessionDuration,
+              }),
+            );
           }
 
           // Sync permissions boundary — put when desired, delete when
           // cleared, no-op when unchanged.
           if (news.permissionsBoundary !== observedPermissionsBoundary) {
             if (news.permissionsBoundary) {
-              yield* iam.putRolePermissionsBoundary({
-                RoleName: roleName,
-                PermissionsBoundary: news.permissionsBoundary,
-              });
-            } else if (observedPermissionsBoundary) {
-              yield* iam
-                .deleteRolePermissionsBoundary({
+              yield* retryIamMutation(
+                iam.putRolePermissionsBoundary({
                   RoleName: roleName,
-                })
-                .pipe(
-                  Effect.catchTag("NoSuchEntityException", () => Effect.void),
-                );
+                  PermissionsBoundary: news.permissionsBoundary,
+                }),
+              );
+            } else if (observedPermissionsBoundary) {
+              yield* retryIamMutation(
+                iam.deleteRolePermissionsBoundary({
+                  RoleName: roleName,
+                }),
+              ).pipe(
+                Effect.catchTag("NoSuchEntityException", () => Effect.void),
+              );
             }
           }
 
@@ -403,11 +469,13 @@ export const RoleProvider = () =>
             roleName,
             olds: observedManagedPolicies,
             news: news.managedPolicyArns ?? [],
+            justCreated,
           });
           yield* syncInlinePolicies({
             roleName,
             olds: observedInlinePolicies,
             news: news.inlinePolicies ?? {},
+            justCreated,
           });
 
           // Sync tags against the cloud's actual tags so adoption /
@@ -415,16 +483,20 @@ export const RoleProvider = () =>
           const observedTags = yield* readTags(roleName);
           const { removed, upsert } = diffTags(observedTags, desiredTags);
           if (upsert.length > 0) {
-            yield* iam.tagRole({
-              RoleName: roleName,
-              Tags: upsert,
-            });
+            yield* retryIamMutation(
+              iam.tagRole({
+                RoleName: roleName,
+                Tags: upsert,
+              }),
+            );
           }
           if (removed.length > 0) {
-            yield* iam.untagRole({
-              RoleName: roleName,
-              TagKeys: removed,
-            });
+            yield* retryIamMutation(
+              iam.untagRole({
+                RoleName: roleName,
+                TagKeys: removed,
+              }),
+            );
           }
 
           // Re-read for fresh attributes after all mutations.
@@ -456,59 +528,85 @@ export const RoleProvider = () =>
           };
         }),
         delete: Effect.fn(function* ({ output }) {
-          yield* iam
-            .deleteRolePermissionsBoundary({
+          yield* retryIamMutation(
+            iam.deleteRolePermissionsBoundary({
               RoleName: output.roleName,
-            })
-            .pipe(Effect.catchTag("NoSuchEntityException", () => Effect.void));
+            }),
+          ).pipe(Effect.catchTag("NoSuchEntityException", () => Effect.void));
 
-          yield* iam.listRolePolicies({ RoleName: output.roleName }).pipe(
-            Effect.flatMap((policies) =>
-              Effect.all(
-                (policies.PolicyNames ?? []).map((policyName) =>
-                  iam
-                    .deleteRolePolicy({
-                      RoleName: output.roleName,
-                      PolicyName: policyName,
-                    })
-                    .pipe(
+          yield* iam
+            .listRolePolicies({ RoleName: output.roleName })
+            .pipe(
+              Effect.catchTag("NoSuchEntityException", () =>
+                Effect.succeed({ PolicyNames: [] as string[] }),
+              ),
+            )
+            .pipe(
+              Effect.flatMap((policies) =>
+                Effect.all(
+                  (policies.PolicyNames ?? []).map((policyName) =>
+                    retryIamMutation(
+                      iam.deleteRolePolicy({
+                        RoleName: output.roleName,
+                        PolicyName: policyName,
+                      }),
+                    ).pipe(
                       Effect.catchTag(
                         "NoSuchEntityException",
                         () => Effect.void,
                       ),
                     ),
-                ),
-              ),
-            ),
-          );
-
-          yield* iam
-            .listAttachedRolePolicies({ RoleName: output.roleName })
-            .pipe(
-              Effect.flatMap((policies) =>
-                Effect.all(
-                  (policies.AttachedPolicies ?? []).map((policy) =>
-                    iam
-                      .detachRolePolicy({
-                        RoleName: output.roleName,
-                        PolicyArn: policy.PolicyArn!,
-                      })
-                      .pipe(
-                        Effect.catchTag(
-                          "NoSuchEntityException",
-                          () => Effect.void,
-                        ),
-                      ),
                   ),
                 ),
               ),
             );
 
           yield* iam
+            .listAttachedRolePolicies({ RoleName: output.roleName })
+            .pipe(
+              Effect.catchTag("NoSuchEntityException", () =>
+                Effect.succeed({ AttachedPolicies: [] }),
+              ),
+            )
+            .pipe(
+              Effect.flatMap((policies) =>
+                Effect.all(
+                  (policies.AttachedPolicies ?? []).map((policy) =>
+                    retryIamMutation(
+                      iam.detachRolePolicy({
+                        RoleName: output.roleName,
+                        PolicyArn: policy.PolicyArn!,
+                      }),
+                    ).pipe(
+                      Effect.catchTag(
+                        "NoSuchEntityException",
+                        () => Effect.void,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+
+          // `DeleteConflict` happens when something still references the
+          // role (e.g. an instance profile that hasn't finished detaching).
+          // It usually clears within a few seconds — bound the retry so a
+          // genuine, persistent reference surfaces.
+          yield* iam
             .deleteRole({
               RoleName: output.roleName,
             })
-            .pipe(Effect.catchTag("NoSuchEntityException", () => Effect.void));
+            .pipe(
+              Effect.retry({
+                while: (e) =>
+                  e._tag === "DeleteConflictException" ||
+                  isRetryableIamControlPlaneError(e),
+                schedule: Schedule.exponential(500).pipe(
+                  Schedule.both(Schedule.recurs(10)),
+                ),
+              }),
+              Effect.catchTag("NoSuchEntityException", () => Effect.void),
+            );
         }),
       };
     }),
