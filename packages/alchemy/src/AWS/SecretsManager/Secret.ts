@@ -51,6 +51,23 @@ export interface SecretProps {
    * User-defined tags for the secret.
    */
   tags?: Record<string, string>;
+  /**
+   * When the resource is destroyed, immediately delete the secret without
+   * the soft-delete recovery window. Defaults to `true` so engine-driven
+   * `destroy` calls leave nothing behind that would block re-creating a
+   * secret with the same name.
+   *
+   * Set to `false` if you want AWS to schedule deletion with the
+   * `recoveryWindowInDays` window so the secret can be restored.
+   * @default true
+   */
+  forceDelete?: boolean;
+  /**
+   * Recovery window (in days) used when `forceDelete` is `false`. AWS
+   * accepts 7–30. Ignored when `forceDelete` is `true`.
+   * @default 30
+   */
+  recoveryWindowInDays?: number;
 }
 
 export interface Secret extends Resource<
@@ -162,6 +179,10 @@ export const SecretProvider = () =>
             SecretId: secretId,
           })
           .pipe(
+            // `ResourceNotFoundException` means it's gone (or never
+            // existed). Anything else (auth, throttling, server) MUST
+            // surface so the engine can retry or fail loudly instead of
+            // silently treating the secret as missing.
             Effect.catchTag("ResourceNotFoundException", () =>
               Effect.succeed(undefined),
             ),
@@ -207,12 +228,27 @@ export const SecretProvider = () =>
             news.generateSecretString !== undefined;
 
           // Observe — describe the secret using whichever identifier we
-          // have (ARN preferred, name as fallback).
+          // have (ARN preferred, name as fallback). `describeSecret`
+          // returns the secret even when it is scheduled for deletion;
+          // `DeletedDate` is the signal that we need to restore before
+          // we can mutate it.
           let observed = yield* readSecret(output?.secretArn ?? secretName);
 
+          // If the secret is in the soft-delete window, restore it
+          // before doing anything else. CreateSecret and UpdateSecret
+          // both reject scheduled-for-deletion secrets with
+          // `InvalidRequestException`.
+          if (observed?.ARN && observed.DeletedDate !== undefined) {
+            yield* secretsmanager.restoreSecret({
+              SecretId: observed.ARN,
+            });
+            observed = yield* readSecret(observed.ARN);
+          }
+
           // Ensure — create if missing. Tolerate `ResourceExistsException`
-          // by re-describing; the sync step below converges metadata and
-          // value.
+          // (race: another writer created the secret between our describe
+          // and create) by re-describing; the sync step below converges
+          // metadata, value, and tags.
           if (!observed?.ARN) {
             yield* secretsmanager
               .createSecret({
@@ -239,21 +275,43 @@ export const SecretProvider = () =>
 
           const secretArn = observed.ARN;
 
-          // Sync metadata + value. `updateSecret` accepts description,
-          // KMS key, and the secret value in one call. We always send
-          // metadata (idempotent) and only send a new value if the user
-          // provided one — `updateSecret` requires SecretString or
-          // SecretBinary to actually rotate, but is fine to call without
-          // them to update description/kmsKeyId only.
-          const valuePayload = yield* createValue(news);
-          const updated = yield* secretsmanager.updateSecret({
-            SecretId: secretArn,
-            Description: news.description,
-            KmsKeyId: news.kmsKeyId,
-            ...valuePayload,
-          });
+          // Sync metadata + value. Diff against observed cloud state so
+          // that out-of-band drift on `Description` / `KmsKeyId` is
+          // converged back, and we don't bump the secret version with a
+          // pointless `updateSecret` call when nothing has changed.
+          const descriptionDrifted =
+            (observed.Description ?? undefined) !==
+            (news.description ?? undefined);
+          const kmsKeyDrifted =
+            (observed.KmsKeyId ?? undefined) !==
+            (news.kmsKeyId ?? undefined);
+          const needsUpdate = hasNewValue || descriptionDrifted || kmsKeyDrifted;
 
-          // Sync tags — diff observed cloud tags against desired.
+          let nextVersionId = output?.versionId;
+          if (needsUpdate) {
+            const valuePayload = yield* createValue(news);
+            const updated = yield* secretsmanager.updateSecret({
+              SecretId: secretArn,
+              // Send Description only when it has actually drifted so we
+              // don't accidentally roundtrip `undefined` -> `""`.
+              // UpdateSecret leaves unspecified fields unchanged, and
+              // sending an empty string clears the value, which lets the
+              // user reset back to "no description" by setting
+              // `description: undefined`.
+              ...(descriptionDrifted
+                ? { Description: news.description ?? "" }
+                : {}),
+              ...(kmsKeyDrifted ? { KmsKeyId: news.kmsKeyId ?? "" } : {}),
+              ...valuePayload,
+            });
+            if (hasNewValue) {
+              nextVersionId = updated.VersionId ?? output?.versionId;
+            }
+          }
+
+          // Sync tags — diff observed cloud tags against desired so
+          // adoption (where existing cloud tags don't match what we
+          // last persisted) converges correctly.
           const observedTags = toTagRecord(observed.Tags);
           const { removed, upsert } = diffTags(observedTags, desiredTags);
 
@@ -275,22 +333,30 @@ export const SecretProvider = () =>
           return {
             secretArn,
             secretName: observed.Name,
-            versionId: hasNewValue
-              ? (updated.VersionId ?? output?.versionId)
-              : output?.versionId,
+            versionId: nextVersionId,
             description: news.description,
             kmsKeyId: news.kmsKeyId,
             tags: desiredTags,
           };
         }),
-        delete: Effect.fn(function* ({ output }) {
+        delete: Effect.fn(function* ({ olds, output }) {
+          const forceDelete = olds.forceDelete ?? true;
           yield* secretsmanager
             .deleteSecret({
               SecretId: output.secretArn,
-              ForceDeleteWithoutRecovery: true,
+              ...(forceDelete
+                ? { ForceDeleteWithoutRecovery: true }
+                : {
+                    RecoveryWindowInDays: olds.recoveryWindowInDays ?? 30,
+                  }),
             })
             .pipe(
+              // `ResourceNotFoundException` -> already gone, no-op.
               Effect.catchTag("ResourceNotFoundException", () => Effect.void),
+              // `InvalidRequestException` is what AWS returns when the
+              // secret is *already* scheduled for deletion. Treat as a
+              // no-op so engine-level double-destroy is safe.
+              Effect.catchTag("InvalidRequestException", () => Effect.void),
             );
         }),
       };
