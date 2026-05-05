@@ -1,5 +1,6 @@
 import { $ } from "bun";
 import * as net from "net";
+import * as path from "node:path";
 
 const isLocal = !!process.env.LOCAL;
 
@@ -12,8 +13,6 @@ if (isLocal) {
 
   // Wait for localstack port 4566 to be open before proceeding
   while (true) {
-    // INSERT_YOUR_CODE
-    // Try to connect with node to 127.0.0.1:$1 until successful.
     try {
       await new Promise((resolve, reject) => {
         const socket = net.connect({ port: 4566, host: "127.0.0.1" }, () => {
@@ -33,19 +32,25 @@ if (isLocal) {
 let exitCode = 1;
 
 try {
-  // Run tests with inherited stdout/stderr, passing through all args
+  // Run tests with inherited stdout/stderr, passing through all args.
+  // Run from packages/alchemy so that bunfig.toml in that package is
+  // picked up (preload, etc). `--timeout=120000` matches the legacy
+  // vitest config: integration tests against AWS/Cloudflare routinely
+  // take >5s (bun's default). Per-arg --timeout from the caller wins
+  // because bun keeps the last occurrence.
   const args = process.argv.slice(2);
-  const proc = Bun.spawn(["bun", "vitest", "run", ...args], {
-    stdio: ["inherit", "inherit", "inherit"],
-    env: process.env,
-    cwd: process.cwd(),
-  });
+  const proc = Bun.spawn(
+    ["bun", "test", "--timeout=120000", ...args],
+    {
+      stdio: ["inherit", "inherit", "inherit"],
+      env: process.env,
+      cwd: path.resolve(import.meta.dir, "..", "packages", "alchemy"),
+    },
+  );
 
-  // Wait for the process to complete
   exitCode = await proc.exited;
 } finally {
   if (isLocal) {
-    // Stop localstack as cleanup
     await $`localstack stop`.quiet();
   }
 }

@@ -12,6 +12,32 @@ import type { CompiledStack } from "../Stack.ts";
 import type { Stage } from "../Stage.ts";
 import * as Core from "./Core.ts";
 
+// Detect whether we are running under `bun test` rather than `bun vitest run`.
+// We can't statically `import "bun:test"` because vitest (running on Vite's
+// resolver) does not understand the bun: scheme. Instead we synchronously
+// `require("bun:test")` when `Bun` is available — the import will only
+// succeed inside a `bun test` process, where bun:test's runtime is wired up.
+//
+// The discriminator matters because `@effect/vitest`'s `it.live` registers
+// each test as `it(name, options, (ctx) => run(...))`. Bun:test treats any
+// function with arity >= 1 as having a `done` callback and waits forever for
+// it to fire. When that's our runner we bypass `it.live` and call bun:test
+// directly with a 0-arg wrapper.
+const bunTest: { it: any } | null = (() => {
+  if (typeof (globalThis as any).Bun === "undefined") return null;
+  try {
+    // `import.meta.require` is bun-only and works in pure ESM modules where
+    // CommonJS `require` is unavailable. Bun resolves `bun:test` only inside
+    // a `bun test` process, so this throws (and we return null) under
+    // `bun vitest run`, `bun run`, or any non-test bun process.
+    return (import.meta as any).require("bun:test") as { it: any };
+  } catch {
+    return null;
+  }
+})();
+const bunTestIt = bunTest?.it;
+const isUnderBunTest = bunTest !== null;
+
 export type MakeOptions<ROut = any> = Core.MakeOptions<ROut>;
 export type ScratchStack = Core.ScratchStack;
 export type TestEffect<A, R = never> = Core.TestEffect<A, R>;
@@ -98,49 +124,95 @@ export const make = <ROut = any>(options: MakeOptions<ROut>): TestApi => {
   const wrap = <A>(eff: TestEffect<A>) => Core.toEffect(eff, options);
   const runEff = <A>(eff: TestEffect<A>) => Core.run(eff, options);
 
+  // Test registration helper. Under `bun test` we go straight to bun:test's
+  // `it` family with a 0-arg runner returning a Promise, sidestepping the
+  // arity-1 callback that `@effect/vitest`'s `it.live` would have produced
+  // (which deadlocks bun:test on its done-callback heuristic). Under real
+  // vitest we keep `it.live` so Effect-aware test fixtures stay first-class.
+  const registerTest = (
+    name: string,
+    runner: () => Promise<unknown>,
+    opts: TestOptions | undefined,
+  ) => {
+    if (isUnderBunTest) {
+      bunTestIt(name, runner, timeoutOf(opts));
+    } else {
+      it.live(
+        name,
+        () =>
+          Effect.promise(runner) as unknown as Effect.Effect<unknown, never>,
+        timeoutOf(opts),
+      );
+    }
+  };
+  const registerOnly = (
+    name: string,
+    runner: () => Promise<unknown>,
+    opts: TestOptions | undefined,
+  ) => {
+    if (isUnderBunTest) {
+      bunTestIt.only(name, runner, timeoutOf(opts));
+    } else {
+      it.only(
+        name,
+        () =>
+          Effect.promise(runner) as unknown as Effect.Effect<unknown, never>,
+        timeoutOf(opts),
+      );
+    }
+  };
+  const registerSkip = (name: string, opts: TestOptions | undefined) => {
+    if (isUnderBunTest) {
+      bunTestIt.skip(name, () => {}, timeoutOf(opts));
+    } else {
+      it.skip(name, () => {}, timeoutOf(opts));
+    }
+  };
+  const registerTodo = (name: string) => {
+    if (isUnderBunTest) {
+      bunTestIt.todo(name);
+    } else {
+      it.todo(name);
+    }
+  };
+
   const test = ((name, eff, opts) => {
-    it.live(name, () => wrap(eff), timeoutOf(opts));
+    registerTest(name, () => runEff(eff), opts);
   }) as TestFn;
 
-  test.skip = (name, _eff, opts) => {
-    it.skip(name, () => {}, timeoutOf(opts));
-  };
+  test.skip = (name, _eff, opts) => registerSkip(name, opts);
   test.skipIf = (condition) => (name, eff, opts) => {
     if (condition) {
-      it.skip(name, () => {}, timeoutOf(opts));
+      registerSkip(name, opts);
     } else {
-      it.live(name, () => wrap(eff), timeoutOf(opts));
+      registerTest(name, () => runEff(eff), opts);
     }
   };
   test.only = (name, eff, opts) => {
-    it.only(name, () => wrap(eff) as Effect.Effect<any>, timeoutOf(opts));
+    registerOnly(name, () => runEff(eff), opts);
   };
-  test.todo = (name, _eff, _opts) => {
-    it.todo(name);
-  };
+  test.todo = (name, _eff, _opts) => registerTodo(name);
 
-  const wrapProvider = (
+  const runProvider = (
     name: string,
     fn: (stack: ScratchStack) => Effect.Effect<void, any, any>,
   ) => {
     const scratch = Core.scratchStack(options, name);
-    return Core.toEffect(
-      Core.withProviders(fn(scratch), options, scratch.name),
-      { ...options, state: scratch.state },
-    );
+    return Core.run(Core.withProviders(fn(scratch), options, scratch.name), {
+      ...options,
+      state: scratch.state,
+    });
   };
 
   const provider = ((name, fn, opts) => {
-    it.live(name, () => wrapProvider(name, fn), timeoutOf(opts));
+    registerTest(name, () => runProvider(name, fn), opts);
   }) as ProviderFn;
-  provider.skip = (name, _fn, opts) => {
-    it.skip(name, () => {}, timeoutOf(opts));
-  };
+  provider.skip = (name, _fn, opts) => registerSkip(name, opts);
   provider.skipIf = (condition) => (name, fn, opts) => {
     if (condition) {
-      it.skip(name, () => {}, timeoutOf(opts));
+      registerSkip(name, opts);
     } else {
-      it.live(name, () => wrapProvider(name, fn), timeoutOf(opts));
+      registerTest(name, () => runProvider(name, fn), opts);
     }
   };
   test.provider = provider;

@@ -1,0 +1,52 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Need full history so `bun test --changed=origin/main` can compute
+      # the import-graph diff against main. fetch-depth: 0 + an explicit
+      # fetch of main (in case the runner is on a shallow clone of a fork)
+      # is the simplest setup that works for both push and pull_request.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # `--changed` requires Bun >= 1.3.13
+          bun-version: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+
+      - run: bun install
+
+      # On push to main: run all tests so main is always green.
+      # On PR: run only tests whose import graph touches a file changed
+      #        relative to the PR's base branch (origin/<base>).
+      - name: Run tests
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_REF" ]; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF"
+            bun ./scripts/test.ts --changed="origin/${BASE_REF}"
+          else
+            bun ./scripts/test.ts
+          fi
