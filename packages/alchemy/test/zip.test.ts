@@ -3,6 +3,7 @@ import { zipCode } from "@/Util/zip";
 import * as Effect from "effect/Effect";
 import { expect, test } from "vitest";
 
+// Touched to verify `bun test --changed=origin/main` scopes CI to this file.
 test("zipCode is deterministic for identical inputs", async () => {
   const hash = () =>
     Effect.runPromise(
