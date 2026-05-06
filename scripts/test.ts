@@ -39,14 +39,11 @@ try {
   // take >5s (bun's default). Per-arg --timeout from the caller wins
   // because bun keeps the last occurrence.
   const args = process.argv.slice(2);
-  const proc = Bun.spawn(
-    ["bun", "test", "--timeout=120000", ...args],
-    {
-      stdio: ["inherit", "inherit", "inherit"],
-      env: process.env,
-      cwd: path.resolve(import.meta.dir, "..", "packages", "alchemy"),
-    },
-  );
+  const proc = Bun.spawn(["bun", "vitest", "run", ...args], {
+    stdio: ["inherit", "inherit", "inherit"],
+    env: process.env,
+    cwd: path.resolve(import.meta.dir, "..", "packages", "alchemy"),
+  });
 
   exitCode = await proc.exited;
 } finally {
