@@ -408,6 +408,52 @@ describe("linear update propagation", () => {
   );
 });
 
+describe("binding persistence", () => {
+  // Regression: when a resource is created with bindings whose data
+  // references another resource's Output (e.g. a Hyperdrive id used in a
+  // Worker binding), the persisted binding state must be the *resolved*
+  // payload, not the raw Output expression. Otherwise the next plan's
+  // binding diff sees `id: undefined` (stored) ↦ `id: <resolved>` (fresh)
+  // and forces a spurious update.
+  test.provider(
+    "second deploy noops when bindings reference a peer resource's output",
+    (stack) =>
+      Effect.gen(function* () {
+        const program = () =>
+          Effect.gen(function* () {
+            const A = yield* BindingTarget("A", {
+              name: "a",
+              string: "a-value",
+            });
+            const B = yield* BindingTarget("B", {
+              name: "b",
+              string: "b-value",
+            });
+            yield* B.bind("FromA", {
+              env: { PEER: A.string },
+            });
+            return { A, B };
+          });
+
+        yield* stack.deploy(program());
+        const stateAfterFirst = yield* getState("B");
+        expect(stateAfterFirst?.status).toEqual("created");
+        // Persisted binding payload must already have A.string resolved,
+        // not stored as an unresolved Output expression.
+        expect(stateAfterFirst?.bindings?.[0]?.data).toEqual({
+          env: { PEER: "a-value" },
+        });
+
+        yield* stack.deploy(program());
+        // Second deploy with no prop changes must noop both — before the
+        // fix, B was forced to update because its persisted binding lost
+        // the resolved peer value during JSON serialization.
+        expect((yield* getState("A"))?.status).toEqual("created");
+        expect((yield* getState("B"))?.status).toEqual("created");
+      }),
+  );
+});
+
 describe("circularity via bindings", () => {
   const selfBoundStack = (props: {
     string: string;

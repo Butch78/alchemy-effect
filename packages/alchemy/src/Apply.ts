@@ -550,7 +550,11 @@ const executeNode = (
           resourceType: node.resource.Type,
           props: news,
           attr,
-          bindings: excludeDeletedBindings(node.bindings),
+          // Persist the *resolved* bindings (same payload the provider just
+          // applied), not the raw `node.bindings` Output expressions.
+          // Otherwise the next plan's binding diff sees `id: <Output>` ↦
+          // `id: <resolved>` and fires a spurious update.
+          bindings: bindingOutputs,
           providerVersion: node.provider.version ?? 0,
           downstream: node.downstream,
           removalPolicy: node.resource.RemovalPolicy,
@@ -677,7 +681,7 @@ const executeNode = (
             resourceType: node.resource.Type,
             props: news,
             attr,
-            bindings: excludeDeletedBindings(node.bindings),
+            bindings: bindingOutputs,
             providerVersion: node.provider.version ?? 0,
             downstream: node.downstream,
             removalPolicy: node.resource.RemovalPolicy,
@@ -841,7 +845,7 @@ const executeNode = (
           props: news,
           attr,
           providerVersion: node.provider.version ?? 0,
-          bindings: excludeDeletedBindings(node.bindings),
+          bindings: bindingOutputs,
           downstream: node.downstream,
           // Preserve the remaining backlog exactly as-is. GC is responsible for
           // popping one generation at a time until the chain is exhausted.
