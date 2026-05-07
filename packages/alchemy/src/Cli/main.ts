@@ -9,8 +9,10 @@ import { TelemetryLive } from "alchemy/Telemetry/Layer";
 import { PlatformServices } from "alchemy/Util/PlatformServices";
 import packageJson from "../../package.json" with { type: "json" };
 
+import { checkLatestVersion } from "./checkVersion.ts";
 import { handleCancellation } from "./commands/_shared.ts";
-import { bootstrapCommand } from "./commands/bootstrap.ts";
+import { awsCommand } from "./commands/aws.ts";
+import { cloudflareCommand } from "./commands/cloudflare.ts";
 import {
   deployCommand,
   destroyCommand,
@@ -22,11 +24,12 @@ import { logsCommand } from "./commands/logs.ts";
 import { profileCommand } from "./commands/profile.ts";
 import { stateCommand } from "./commands/state.ts";
 import { tailCommand } from "./commands/tail.ts";
-import { inkCLI } from "./tui/InkCLI.tsx";
+import { selectCli } from "./selectCli.ts";
 
 const root = Command.make("alchemy", {}).pipe(
   Command.withSubcommands([
-    bootstrapCommand,
+    awsCommand,
+    cloudflareCommand,
     deployCommand,
     devCommand,
     destroyCommand,
@@ -49,10 +52,18 @@ const services = Layer.mergeAll(
   FetchHttpClient.layer,
   ConfigProvider.layer(ConfigProvider.fromEnv()),
   TelemetryLive,
-  inkCLI(),
+  selectCli(),
 );
 
-export const main = cli.pipe(
+const program = Effect.gen(function* () {
+  // Best-effort, non-blocking check for a newer published version. If the
+  // CLI command finishes before the registry responds, the fiber is
+  // interrupted on scope close — that's intentional.
+  yield* checkLatestVersion.pipe(Effect.forkScoped);
+  return yield* cli;
+});
+
+export const main = program.pipe(
   // $USER and $STAGE are set by the environment
   Effect.provide(services),
   Effect.scoped,
