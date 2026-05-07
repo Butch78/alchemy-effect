@@ -134,6 +134,7 @@ export const providers = () =>
 const isMisleadinglyTaggedTransient = (error: unknown): boolean => {
   if (!error || typeof error !== "object") return false;
   const tag = (error as { _tag?: unknown })._tag;
+  const status = (error as { status?: unknown }).status;
   const message = ((error as { message?: unknown }).message ?? "") as string;
   // CF code 10001: "Method not allowed for token" is a real permission
   // failure (NOT retryable), but the same code is also returned with
@@ -141,6 +142,18 @@ const isMisleadinglyTaggedTransient = (error: unknown): boolean => {
   // messages are unambiguously distinct, so we can safely retry only
   // the internal-error variant.
   if (tag === "Forbidden" && /internal error/i.test(message)) return true;
+  // `CloudflareHttpError` is the catch-all distilled raises when CF
+  // returns a non-JSON body (HTML 520 pages, edge auth blips that
+  // produce a bare `Unauthorized`, etc.). 401/403/5xx of this shape
+  // are not API-level permission failures — they're CF-edge transients
+  // that consistently clear within a few seconds. Retry them.
+  if (
+    tag === "CloudflareHttpError" &&
+    typeof status === "number" &&
+    (status === 401 || status === 403 || status >= 500)
+  ) {
+    return true;
+  }
   return false;
 };
 

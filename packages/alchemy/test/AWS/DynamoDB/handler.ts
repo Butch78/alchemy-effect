@@ -69,6 +69,16 @@ export default DynamoDBTestFunction.make(
           `Request: ${request.method} ${pathname} (originalUrl: ${request.originalUrl}, url: ${request.url})`,
         );
 
+        // Pure readiness probe — the Lambda is up and the handler can serve
+        // a request. Does NOT exercise any DynamoDB binding, so it can't
+        // mask IAM-propagation lag the way `/scan` does (a same-tick
+        // post-deploy `/scan` can fail with `AccessDeniedException` for
+        // tens of seconds before the policy lands, which `Effect.orDie`
+        // below maps to a generic `500 Internal Server Error`).
+        if (request.method === "GET" && pathname === "/ready") {
+          return yield* HttpServerResponse.json({ ok: true });
+        }
+
         if (request.method === "POST" && pathname === "/put") {
           const body = (yield* request.json) as unknown as {
             pk: string;
@@ -331,7 +341,28 @@ export default DynamoDBTestFunction.make(
           },
           { status: 404 },
         );
-      }).pipe(Effect.orDie),
+      }).pipe(
+        // Surface binding failures as a structured 500 instead of Lambda's
+        // generic "Internal Server Error" body. The IAM-policy lag that
+        // Bindings tests sometimes hit produces an `AccessDeniedException`
+        // tagged error here; without this catch, `Effect.orDie` collapses
+        // it to a defect that Lambda's runtime stringifies as the generic
+        // "Internal Server Error" — losing the diagnostic message and
+        // making it indistinguishable from a real bug. Returning JSON
+        // keeps the body machine-readable for retry probes and humans.
+        Effect.catch((error) =>
+          HttpServerResponse.json(
+            {
+              error: String((error as { _tag?: string })?._tag ?? error),
+              message: String((error as { message?: string })?.message ?? ""),
+              stack:
+                error instanceof Error ? error.stack?.slice(0, 2000) : undefined,
+            },
+            { status: 500 },
+          ),
+        ),
+        Effect.orDie,
+      ),
     };
   }).pipe(
     Effect.provide(

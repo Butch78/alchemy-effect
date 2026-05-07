@@ -20,7 +20,7 @@ const sharedStack = Core.scratchStack(testOptions, "DynamoDBBindings");
 // propagate to the live invocation can stack to >150s on a busy account
 // under parallel-suite load. Symptom: the URL returns 500s for the entire
 // budget because the scan inside the handler hits AccessDenied until the
-// policy lands. Budget 200s — still well inside the beforeAll 240s
+// policy lands. Budget 200s — well inside the surrounding beforeAll
 // timeout — so the suite stays robust without slowing down the happy path.
 const readinessPolicy = Schedule.fixed("2 seconds").pipe(
   Schedule.both(Schedule.recurs(100)),
@@ -46,7 +46,13 @@ describe("DynamoDB Bindings", () => {
 
       expect(functionUrl).toBeTruthy();
       baseUrl = functionUrl!.replace(/\/+$/, "");
-      const readinessUrl = `${baseUrl}/scan`;
+      // Probe `/ready` — a no-binding endpoint that just confirms the
+      // Lambda is up. We deliberately don't probe `/scan` here because
+      // the handler `Effect.orDie`s any binding failure into a generic
+      // "Internal Server Error", which means we can't tell IAM lag apart
+      // from a real bug. Tests further down own their own retry budgets
+      // for the IAM-propagation window.
+      const readinessUrl = `${baseUrl}/ready`;
 
       yield* Effect.logInfo(
         `DynamoDB test setup: function URL ready (${functionUrl})`,
@@ -59,7 +65,15 @@ describe("DynamoDB Bindings", () => {
         Effect.flatMap((response) =>
           response.status === 200
             ? Effect.succeed(response)
-            : Effect.fail(new Error(`Function not ready: ${response.status}`)),
+            : response.text.pipe(
+                Effect.flatMap((body) =>
+                  Effect.fail(
+                    new Error(
+                      `Function not ready: ${response.status} body=${body.slice(0, 500)}`,
+                    ),
+                  ),
+                ),
+              ),
         ),
         Effect.tap(() =>
           Effect.logInfo("DynamoDB test setup: fixture responded successfully"),
@@ -71,6 +85,39 @@ describe("DynamoDB Bindings", () => {
         ),
         Effect.retry({ schedule: readinessPolicy }),
       );
+
+      // Warm the bindings: call `/scan` (which requires the dynamodb:Scan
+      // policy) and retry on 5xx until it succeeds. IAM policy propagation
+      // is global rather than per-role, so on a heavily-loaded account a
+      // policy attached at deploy time can lag the Lambda's invocation
+      // path by tens of seconds. Absorb that lag here so individual tests
+      // don't need their own retries — by the time we return, the policy
+      // is observable from inside the live Lambda.
+      yield* Effect.logInfo(
+        "DynamoDB test setup: warming bindings (waiting for IAM policy propagation)",
+      );
+      yield* HttpClient.get(`${baseUrl}/scan`).pipe(
+        Effect.flatMap((response) =>
+          response.status === 200
+            ? Effect.succeed(response)
+            : response.text.pipe(
+                Effect.flatMap((body) =>
+                  Effect.fail(
+                    new Error(
+                      `scan binding not ready: ${response.status} body=${body.slice(0, 500)}`,
+                    ),
+                  ),
+                ),
+              ),
+        ),
+        Effect.tapError((error) =>
+          Effect.logWarning(
+            `DynamoDB test setup: bindings not warm yet (${String(error)})`,
+          ),
+        ),
+        Effect.retry({ schedule: readinessPolicy }),
+      );
+      yield* Effect.logInfo("DynamoDB test setup: bindings warm");
     }),
     { timeout: 240_000 },
   );

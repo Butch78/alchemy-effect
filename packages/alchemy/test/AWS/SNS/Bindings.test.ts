@@ -15,8 +15,20 @@ import {
 
 const { test } = Test.make({ providers: AWS.providers() });
 
+// Lambda function URL cold-start (DNS, IAM propagation, init) plus the
+// time it takes for the freshly-attached SNS / SQS policies to propagate
+// to the live invocation can stack to >150s on a busy account under
+// parallel-suite load. Symptom: `/ready` returns 200 (no IAM needed) but
+// the next `/publish` call returns a 500 because the SNS publish policy
+// hasn't landed yet. Budget 200s — well inside the surrounding 240s
+// hook timeout — and retry HTTP 5xx in the per-call helpers below so a
+// late-binding policy doesn't fail the assertion.
 const readinessPolicy = Schedule.fixed("2 seconds").pipe(
-  Schedule.both(Schedule.recurs(9)),
+  Schedule.both(Schedule.recurs(100)),
+);
+
+const transientHttpRetry = Schedule.fixed(500).pipe(
+  Schedule.both(Schedule.recurs(180)), // ~90s budget
 );
 
 describe.sequential("SNS Bindings", () => {
@@ -74,31 +86,61 @@ describe.sequential("SNS Bindings", () => {
           Effect.retry({ schedule: readinessPolicy }),
         );
 
+        // The Lambda Function URL can briefly 5xx after `/ready` succeeds —
+        // typically because the freshly-attached SNS/SQS IAM policy is still
+        // propagating to the live invocation (Lambda's auth cache is per-
+        // frontend, so /ready can be served by a "ready" frontend while
+        // /publish lands on one that hasn't refreshed yet). Retry on 5xx
+        // for ~30s; surface a tagged TransientHttp to the retry predicate.
+        const checkStatus = (response: any) =>
+          response.status >= 500
+            ? Effect.fail(new TransientHttp({ status: response.status }))
+            : Effect.succeed(response);
+
+        const retryTransient = <A, R>(eff: Effect.Effect<A, any, R>) =>
+          eff.pipe(
+            Effect.retry({
+              while: (e) => e._tag === "TransientHttp",
+              schedule: transientHttpRetry,
+            }),
+          );
+
         const getJson = (path: string) =>
-          HttpClient.get(`${baseUrl}${path}`).pipe(
-            Effect.flatMap((response) => response.json),
+          retryTransient(
+            HttpClient.get(`${baseUrl}${path}`).pipe(
+              Effect.flatMap(checkStatus),
+              Effect.flatMap((response) => response.json),
+            ),
           );
 
         const postJson = (path: string, body: unknown) =>
-          HttpClient.execute(
-            HttpClientRequest.bodyJsonUnsafe(
-              HttpClientRequest.post(`${baseUrl}${path}`),
-              body,
+          retryTransient(
+            HttpClient.execute(
+              HttpClientRequest.bodyJsonUnsafe(
+                HttpClientRequest.post(`${baseUrl}${path}`),
+                body,
+              ),
+            ).pipe(
+              Effect.flatMap(checkStatus),
+              Effect.tap((response) =>
+                Effect.flatMap(response.text, Effect.logInfo),
+              ),
+              Effect.flatMap((response) => response.json),
             ),
-          ).pipe(
-            Effect.tap((response) =>
-              Effect.flatMap(response.text, Effect.logInfo),
-            ),
-            Effect.flatMap((response) => response.json),
           );
 
         const deleteJson = (path: string, body: unknown) =>
-          HttpClient.execute(
-            HttpClientRequest.bodyJsonUnsafe(
-              HttpClientRequest.delete(`${baseUrl}${path}`),
-              body,
+          retryTransient(
+            HttpClient.execute(
+              HttpClientRequest.bodyJsonUnsafe(
+                HttpClientRequest.delete(`${baseUrl}${path}`),
+                body,
+              ),
+            ).pipe(
+              Effect.flatMap(checkStatus),
+              Effect.flatMap((response) => response.json),
             ),
-          ).pipe(Effect.flatMap((response) => response.json));
+          );
 
         const waitForQueueMessage = Effect.fn(function* (
           predicate: (body: {
@@ -406,6 +448,9 @@ describe.sequential("SNS Bindings", () => {
   );
 });
 
+class TransientHttp extends Data.TaggedError("TransientHttp")<{
+  status: number;
+}> {}
 class QueueMessageNotReady extends Data.TaggedError("QueueMessageNotReady") {}
 class SubscriptionNotListed extends Data.TaggedError("SubscriptionNotListed") {}
 class TopicAttributeNotPropagated extends Data.TaggedError(

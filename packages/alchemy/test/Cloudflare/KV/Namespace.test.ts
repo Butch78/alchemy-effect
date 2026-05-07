@@ -50,10 +50,20 @@ test.provider("create, update, delete namespace", (stack) =>
 
     yield* stack.destroy();
 
+    // KV namespace titles are globally unique per account. Using
+    // hard-coded titles makes the test fragile under repeated runs:
+    // any previous run killed mid-test (SSO expiry, vitest interrupt)
+    // leaves an orphaned namespace, and the next run's rename to
+    // `test-namespace-updated` hits `NamespaceTitleAlreadyExists`
+    // because the orphan still owns that title.
+    const suffix = Math.random().toString(36).slice(2, 8);
+    const initialTitle = `test-namespace-initial-${suffix}`;
+    const updatedTitle = `test-namespace-updated-${suffix}`;
+
     const namespace = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* KV.KVNamespace("TestNamespace", {
-          title: "test-namespace-initial",
+          title: initialTitle,
         });
       }),
     );
@@ -68,7 +78,7 @@ test.provider("create, update, delete namespace", (stack) =>
     const updatedNamespace = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* KV.KVNamespace("TestNamespace", {
-          title: "test-namespace-updated",
+          title: updatedTitle,
         });
       }),
     );
@@ -77,7 +87,7 @@ test.provider("create, update, delete namespace", (stack) =>
       accountId,
       namespaceId: updatedNamespace.namespaceId,
     });
-    expect(actualUpdatedNamespace.title).toEqual("test-namespace-updated");
+    expect(actualUpdatedNamespace.title).toEqual(updatedTitle);
     expect(actualUpdatedNamespace.id).toEqual(updatedNamespace.namespaceId);
 
     yield* stack.destroy();

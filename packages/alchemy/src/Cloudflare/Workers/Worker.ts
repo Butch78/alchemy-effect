@@ -1097,13 +1097,31 @@ export const LiveWorkerProvider = () =>
       // When enabling we also set `previewsEnabled: true` so the
       // script is reachable both at its stable workers.dev URL and at
       // version-preview URLs; on disable we send just `enabled: false`.
+      //
+      // Cloudflare's script-put endpoint and the subdomain endpoint live
+      // on independently-consistent frontends, so a same-tick subdomain
+      // toggle right after `putWorker` can briefly observe the script as
+      // missing — surfacing as `WorkerNotFound` (code 10013, message
+      // "An unknown error has occurred"). Retry on that specific tag for
+      // ~30s; any other error (auth, validation) propagates immediately.
       const setWorkerSubdomain = (name: string, enabled: boolean) =>
         createScriptSubdomain({
           accountId,
           scriptName: name,
           enabled,
           previewsEnabled: enabled ? true : undefined,
-        });
+        }).pipe(
+          Effect.retry({
+            while: (e) =>
+              typeof e === "object" &&
+              e !== null &&
+              "_tag" in e &&
+              e._tag === "WorkerNotFound",
+            schedule: Schedule.fixed(500).pipe(
+              Schedule.both(Schedule.recurs(60)),
+            ),
+          }),
+        );
 
       const createWorkerName = (id: string, name: string | undefined) =>
         name

@@ -13,6 +13,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import { pipe } from "effect/Function";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import { Command, CommandProvider } from "../Build/Command.ts";
@@ -589,9 +590,28 @@ export const providers = () =>
     Layer.orDie,
   );
 
+// Effect's `HttpClient` raises a tagged `HttpClientError` whose `reason`
+// is one of `TransportError | EncodeError | DecodeError | InvalidUrlError
+// | StatusCodeError | EmptyBodyError`. The `TransportError` variant wraps
+// connection-level failures from undici (`ConnectTimeoutError`, dropped
+// sockets, DNS hiccups) — none of which distilled tags as a `NetworkError`
+// category, so distilled's `isTransientError` doesn't catch them. They're
+// fundamentally retryable: the request never reached AWS at all.
+const isHttpTransportError = (error: unknown): boolean => {
+  if (!Predicate.isObject(error)) return false;
+  const e = error as { _tag?: string; reason?: { _tag?: string } };
+  return (
+    e._tag === "HttpClientError" &&
+    (e.reason?._tag === "TransportError" || e.reason?._tag === "EmptyBodyError")
+  );
+};
+
 const awsRetryFactory: RetryFactory = (lastError) => ({
   while: (error) =>
-    isTransientError(error) || isThrottlingError(error) || isRetryable(error),
+    isTransientError(error) ||
+    isThrottlingError(error) ||
+    isRetryable(error) ||
+    isHttpTransportError(error),
   schedule: pipe(
     Schedule.exponential(Duration.millis(200), 2),
     Schedule.modifyDelay(
