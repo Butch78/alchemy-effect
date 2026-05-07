@@ -1,5 +1,8 @@
 import { Retry } from "@distilled.cloud/cloudflare";
-import { CloudflareHttpError } from "@distilled.cloud/cloudflare/Errors";
+import {
+  CloudflareHttpError,
+  UnknownCloudflareError,
+} from "@distilled.cloud/cloudflare/Errors";
 import {
   Forbidden,
   TooManyRequests,
@@ -16,6 +19,7 @@ import * as Schema from "effect/Schema";
 const isForbidden = Schema.is(Forbidden);
 const isUnauthorized = Schema.is(Unauthorized);
 const isCloudflareHttpError = Schema.is(CloudflareHttpError);
+const isUnknownCloudflareError = Schema.is(UnknownCloudflareError);
 const isTooManyRequests = Schema.is(TooManyRequests);
 import { Command } from "../Build/Command.ts";
 import * as Build from "../Build/index.ts";
@@ -167,9 +171,20 @@ const isMisleadinglyTaggedTransient = (error: unknown): boolean => {
   // deliberately doesn't auto-retry — the same code+message is used for
   // both transient auth-edge blips and a genuinely invalid token, so a
   // long retry would silently loop on real auth failures. We still
-  // retry it here, but the surrounding schedule's `recurs(8)` cap means
-  // a genuinely-invalid token surfaces within ~22s — acceptable.
+  // retry it here, but the surrounding schedule's recurs cap means
+  // a genuinely-invalid token surfaces within tens of seconds.
   if (isUnauthorized(error)) return true;
+  // UnknownCloudflareError with `internal error` in the message is the
+  // CF-edge counterpart to a 5xx — generic infrastructure transient,
+  // typically scoped to a single request. Reference IDs in the message
+  // (`reference = e_…`) confirm CF treats them as their own
+  // post-mortem hits, not API-level errors.
+  if (
+    isUnknownCloudflareError(error) &&
+    /internal error/i.test(error.message)
+  ) {
+    return true;
+  }
   return false;
 };
 
@@ -193,7 +208,13 @@ const cloudflareRetryFactory: Retry.Factory = (lastError) => {
       ),
       Retry.capped(Duration.seconds(5)),
       Retry.jittered,
-      Schedule.both(Schedule.recurs(8)),
+      // 15 retries × ≤5s ≈ 60s budget. Bumped from the distilled default
+      // 5 because observed CF edge auth blips (`CloudflareHttpError 401`,
+      // `Unauthorized: Authentication error`) and `internal error`
+      // hiccups have surfaced lasting >20s on busy accounts. A real
+      // invalid token still surfaces in ~60s — the test suite's per-test
+      // timeout (typically 120s) catches it cleanly.
+      Schedule.both(Schedule.recurs(15)),
     ),
   };
 };
