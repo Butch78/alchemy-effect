@@ -356,7 +356,9 @@ export default DynamoDBTestFunction.make(
               error: String((error as { _tag?: string })?._tag ?? error),
               message: String((error as { message?: string })?.message ?? ""),
               stack:
-                error instanceof Error ? error.stack?.slice(0, 2000) : undefined,
+                error instanceof Error
+                  ? error.stack?.slice(0, 2000)
+                  : undefined,
             },
             { status: 500 },
           ),

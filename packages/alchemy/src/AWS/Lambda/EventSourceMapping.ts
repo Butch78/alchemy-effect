@@ -489,14 +489,18 @@ const retryPermissionsPropagation = Effect.retry({
       e.message?.includes("cannot be assumed by Lambda") ||
       e.message?.includes("Please add Lambda as a Trusted Entity") ||
       e.message?.includes("Cannot access stream") ||
-      e.message?.includes("Please ensure the role can perform the GetRecords") ||
+      e.message?.includes(
+        "Please ensure the role can perform the GetRecords",
+      ) ||
       // AWS occasionally returns "The security token included in the
       // request is invalid" when Lambda's EventSourceMapping subsystem
       // tries to assume the execution role before STS has propagated the
       // freshly-attached trust policy to its read replicas. Same root
       // cause as the messages above (IAM eventual consistency); identical
       // recovery (wait + retry).
-      e.message?.includes("The security token included in the request is invalid")),
+      e.message?.includes(
+        "The security token included in the request is invalid",
+      )),
   schedule: Schedule.exponential(100).pipe(Schedule.both(Schedule.recurs(30))),
 }) as <A, R, Err>(self: Effect.Effect<A, Err, R>) => Effect.Effect<A, Err, R>;
 
