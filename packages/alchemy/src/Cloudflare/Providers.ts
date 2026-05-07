@@ -11,6 +11,12 @@ import { pipe } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+
+const isForbidden = Schema.is(Forbidden);
+const isUnauthorized = Schema.is(Unauthorized);
+const isCloudflareHttpError = Schema.is(CloudflareHttpError);
+const isTooManyRequests = Schema.is(TooManyRequests);
 import { Command } from "../Build/Command.ts";
 import * as Build from "../Build/index.ts";
 import * as Provider from "../Provider.ts";
@@ -145,16 +151,14 @@ const isMisleadinglyTaggedTransient = (error: unknown): boolean => {
   // message "internal error" during Cloudflare-side hiccups. The two
   // messages are unambiguously distinct, so we can safely retry only
   // the internal-error variant.
-  if (error instanceof Forbidden && /internal error/i.test(error.message)) {
-    return true;
-  }
+  if (isForbidden(error) && /internal error/i.test(error.message)) return true;
   // `CloudflareHttpError` is the catch-all distilled raises when CF
   // returns a non-JSON body (HTML 520 pages, edge auth blips that
   // produce a bare `Unauthorized`, etc.). 401/403/5xx of this shape
   // are not API-level permission failures — they're CF-edge transients
   // that consistently clear within a few seconds. Retry them.
   if (
-    error instanceof CloudflareHttpError &&
+    isCloudflareHttpError(error) &&
     (error.status === 401 || error.status === 403 || error.status >= 500)
   ) {
     return true;
@@ -165,9 +169,7 @@ const isMisleadinglyTaggedTransient = (error: unknown): boolean => {
   // long retry would silently loop on real auth failures. We still
   // retry it here, but the surrounding schedule's `recurs(8)` cap means
   // a genuinely-invalid token surfaces within ~22s — acceptable.
-  if (error instanceof Unauthorized) {
-    return true;
-  }
+  if (isUnauthorized(error)) return true;
   return false;
 };
 
@@ -183,10 +185,7 @@ const cloudflareRetryFactory: Retry.Factory = (lastError) => {
           const error = yield* Ref.get(lastError);
           // Throttling errors (429): honor a 500ms floor matching the
           // distilled default.
-          if (
-            error instanceof TooManyRequests &&
-            Duration.toMillis(duration) < 500
-          ) {
+          if (isTooManyRequests(error) && Duration.toMillis(duration) < 500) {
             return Duration.toMillis(Duration.millis(500));
           }
           return Duration.toMillis(duration);

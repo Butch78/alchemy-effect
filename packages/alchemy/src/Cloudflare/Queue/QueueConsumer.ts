@@ -1,6 +1,4 @@
 import * as queues from "@distilled.cloud/cloudflare/queues";
-import { UnknownCloudflareError } from "@distilled.cloud/cloudflare/Errors";
-import { BadRequest } from "@distilled.cloud/core/errors";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
@@ -23,16 +21,6 @@ import type { Providers } from "../Providers.ts";
  */
 const QUEUE_HANDLER_MISSING_CODE = 11001;
 const QUEUE_HANDLER_MISSING_MESSAGE = /queue handler is missing/i;
-
-const isQueueHandlerMissing = (e: unknown): boolean => {
-  if (e instanceof UnknownCloudflareError) {
-    return e.code === QUEUE_HANDLER_MISSING_CODE;
-  }
-  if (e instanceof BadRequest) {
-    return QUEUE_HANDLER_MISSING_MESSAGE.test(e.message);
-  }
-  return false;
-};
 
 // ~60s budget — Worker reconcile uploads typically land in 2–10s,
 // but a fresh container/asset deploy can stretch that.
@@ -325,7 +313,10 @@ export const QueueConsumerProvider = () =>
               // handler. Retry until the upload propagates (capped),
               // then surface a real failure if it never does.
               Effect.tapError((e) =>
-                isQueueHandlerMissing(e)
+                (e._tag === "UnknownCloudflareError" &&
+                  e.code === QUEUE_HANDLER_MISSING_CODE) ||
+                (e._tag === "BadRequest" &&
+                  QUEUE_HANDLER_MISSING_MESSAGE.test(e.message))
                   ? Effect.logDebug(
                       `QueueConsumer create: worker ` +
                         `"${news.scriptName}" has no queue handler ` +
@@ -334,7 +325,11 @@ export const QueueConsumerProvider = () =>
                   : Effect.void,
               ),
               Effect.retry({
-                while: isQueueHandlerMissing,
+                while: (e) =>
+                  (e._tag === "UnknownCloudflareError" &&
+                    e.code === QUEUE_HANDLER_MISSING_CODE) ||
+                  (e._tag === "BadRequest" &&
+                    QUEUE_HANDLER_MISSING_MESSAGE.test(e.message)),
                 schedule: queueHandlerReadinessSchedule,
               }),
               Effect.catchTag("ConsumerAlreadyExists", (cause) =>
@@ -387,7 +382,11 @@ export const QueueConsumerProvider = () =>
             deadLetterQueue: news.deadLetterQueue,
           }).pipe(
             Effect.retry({
-              while: isQueueHandlerMissing,
+              while: (e) =>
+                (e._tag === "UnknownCloudflareError" &&
+                  e.code === QUEUE_HANDLER_MISSING_CODE) ||
+                (e._tag === "BadRequest" &&
+                  QUEUE_HANDLER_MISSING_MESSAGE.test(e.message)),
               schedule: queueHandlerReadinessSchedule,
             }),
           );
