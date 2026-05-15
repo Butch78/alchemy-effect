@@ -1,5 +1,7 @@
 export * from "./HttpStateApi.ts";
 export * from "./HttpStateStore.ts";
+export * from "./RpcStateApi.ts";
+export * from "./RpcStateStore.ts";
 export * from "./InMemoryState.ts";
 export * from "./LocalState.ts";
 export * from "./ResourceState.ts";

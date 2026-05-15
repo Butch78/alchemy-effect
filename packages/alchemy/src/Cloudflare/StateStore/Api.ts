@@ -1,17 +1,10 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Path from "effect/Path";
-import * as Etag from "effect/unstable/http/Etag";
-import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
-import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
-import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
+import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 import crypto from "node:crypto";
-import {
-  BearerTokenValidator,
-  StateApi,
-  StateAuthLive,
-} from "../../State/HttpStateApi.ts";
+import { RPC_PATH, StateRpcs } from "../../State/RpcStateApi.ts";
 import * as Secret from "../SecretsStore/Secret.ts";
 import { SecretBindingLive } from "../SecretsStore/SecretBinding.ts";
 import { Worker } from "../Workers/Worker.ts";
@@ -29,73 +22,8 @@ export const STATE_STORE_SCRIPT_NAME = "alchemy-state-store" as const;
  * compare against this constant; a mismatch (or 404) triggers a
  * forced redeploy via the bootstrap flow.
  */
-export const STATE_STORE_VERSION = 4 as const;
+export const STATE_STORE_VERSION = 5 as const;
 
-/**
- * Hard-coded OTLP/HTTP endpoints. Point at the public ingest relay
- * defined in `stacks/otel.ts` (bound to `otel.alchemy.run`), which
- * forwards to Axiom with the bearer token attached server-side. Hard-
- * coded on purpose: the worker has no env-var plumbing and the relay
- * is account-level infra that lives outside any single deploy.
- */
-// const OTEL_TRACES_URL = "https://otel.alchemy.run/v1/traces";
-// const OTEL_METRICS_URL = "https://otel.alchemy.run/v1/metrics";
-// const OTEL_LOGS_URL = "https://otel.alchemy.run/v1/logs";
-
-/**
- * OTLP traces + metrics + logs Layer for the state-store worker.
- * Mirrors the CLI's `TelemetryLive` so every signal the worker emits
- * (`Effect.withSpan`, runtime metrics, `Effect.log*`) ships to the
- * same Axiom datasets as deploy-time CLI signals. Resource attributes
- * brand each signal with the worker's service name + contract version
- * so they're easy to slice in Axiom.
- */
-// const otelResource = {
-//   serviceName: STATE_STORE_SCRIPT_NAME,
-//   serviceVersion: String(STATE_STORE_VERSION),
-//   attributes: {
-//     "alchemy.state_store.script_name": STATE_STORE_SCRIPT_NAME,
-//     "alchemy.state_store.version": STATE_STORE_VERSION,
-//   },
-// } as const;
-
-// const TelemetryLive = Layer.mergeAll(
-//   OtlpTracer.layer({
-//     url: OTEL_TRACES_URL,
-//     resource: otelResource,
-//     exportInterval: "1 second",
-//   }),
-//   OtlpMetrics.layer({
-//     url: OTEL_METRICS_URL,
-//     resource: otelResource,
-//     exportInterval: "1 second",
-//   }),
-//   // Replace (don't merge with) the default stdout logger so worker logs
-//   // ship to Axiom instead of just `wrangler tail`.
-//   OtlpLogger.layer({
-//     url: OTEL_LOGS_URL,
-//     resource: otelResource,
-//     exportInterval: "1 second",
-//     mergeWithExisting: false,
-//   }),
-// ).pipe(
-//   Layer.provide(OtlpSerialization.layerJson),
-//   Layer.provide(FetchHttpClient.layer),
-// );
-
-/**
- * Path on disk to *this* file, used as the worker's bundling entry.
- *
- * When running from source (e.g. dev / monorepo), `import.meta.url` points
- * at `Api.ts` and we can use it directly. When the alchemy CLI is run from
- * its published `bin/alchemy.js` bundle, this module is inlined into the
- * CLI bundle and `import.meta.url` resolves to `bin/alchemy.js` — which
- * has no `default` export and breaks the worker bundler with
- * `[MISSING_EXPORT] "default" is not exported by "bin/alchemy.js"`.
- *
- * In the bundled case, fall back to the published source file shipped
- * alongside the CLI under `../src/Cloudflare/StateStore/Api.ts`.
- */
 export default Worker(
   "Api",
   {
@@ -111,34 +39,9 @@ export default Worker(
     const secret = yield* Secret.Secret.bind(AuthToken);
     const store = yield* Store;
 
-    const bearerTokenValidator = Layer.effect(
-      BearerTokenValidator,
-      secret.get().pipe(
-        Effect.map((expected) =>
-          BearerTokenValidator.of({
-            validate: (token) =>
-              !!expected && timingSafeEqual(token, expected)
-                ? Effect.void
-                : Effect.fail(new HttpApiError.Unauthorized()),
-          }),
-        ),
-        Effect.orDie,
-      ),
-    );
-
-    const versionApi = HttpApiBuilder.group(StateApi, "version", (handlers) =>
-      handlers.handle("getVersion", () =>
-        Effect.succeed({ version: STATE_STORE_VERSION }).pipe(
-          Effect.withSpan("state_store.getVersion", {
-            attributes: { "alchemy.state_store.op": "getVersion" },
-          }),
-        ),
-      ),
-    );
-
-    const stateApi = HttpApiBuilder.group(StateApi, "state", (handlers) =>
-      handlers
-        .handle("listStacks", () =>
+    const StateRpcsLive = StateRpcs.toLayer(
+      Effect.succeed({
+        listStacks: () =>
           store
             .getByName(Store.ROOT_DO_NAME)
             .listStacks()
@@ -147,192 +50,193 @@ export default Worker(
                 attributes: { "alchemy.state_store.op": "listStacks" },
               }),
             ),
-        )
-        .handle("listStages", ({ params }) =>
+        listStages: ({ stack }) =>
           store
-            .getByName(params.stack)
+            .getByName(stack)
             .listStages()
             .pipe(
               Effect.withSpan("state_store.listStages", {
                 attributes: {
                   "alchemy.state_store.op": "listStages",
-                  "alchemy.state_store.stack": params.stack,
+                  "alchemy.state_store.stack": stack,
                 },
               }),
             ),
-        )
-        .handle("listResources", ({ params }) =>
+        listResources: ({ stack, stage }) =>
           store
-            .getByName(params.stack)
-            .listResources({ stage: params.stage })
+            .getByName(stack)
+            .listResources({ stage })
             .pipe(
               Effect.withSpan("state_store.listResources", {
                 attributes: {
                   "alchemy.state_store.op": "listResources",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
                 },
               }),
             ),
-        )
-        .handle("getState", ({ params }) => {
-          const fqn = decodeURIComponent(params.fqn);
-          return store
-            .getByName(params.stack)
-            .get({ stage: params.stage, fqn })
+        getState: ({ stack, stage, fqn }) =>
+          store
+            .getByName(stack)
+            .get({ stage, fqn })
             .pipe(
               Effect.withSpan("state_store.getState", {
                 attributes: {
                   "alchemy.state_store.op": "getState",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
                   "alchemy.state_store.fqn": fqn,
                 },
               }),
-            );
-        })
-        .handle("setState", ({ params, payload }) => {
-          const fqn = decodeURIComponent(params.fqn);
-          return store
-            .getByName(params.stack)
-            .set({ stage: params.stage, fqn, value: payload as any })
+            ),
+        setState: ({ stack, stage, fqn, value }) =>
+          store
+            .getByName(stack)
+            .set({ stage, fqn, value: value as any })
             .pipe(
               Effect.tap(() =>
-                store
-                  .getByName(Store.ROOT_DO_NAME)
-                  .registerStack({ stack: params.stack }),
+                store.getByName(Store.ROOT_DO_NAME).registerStack({ stack }),
               ),
               Effect.withSpan("state_store.setState", {
                 attributes: {
                   "alchemy.state_store.op": "setState",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
                   "alchemy.state_store.fqn": fqn,
                 },
               }),
-            );
-        })
-        .handle("deleteState", ({ params }) => {
-          const fqn = decodeURIComponent(params.fqn);
+            ),
+        deleteState: ({ stack, stage, fqn }) =>
           // The DO method is `remove`, not `delete` — `delete` is
           // reserved by Cloudflare's RPC stub proxy.
-          return store
-            .getByName(params.stack)
-            .remove({ stage: params.stage, fqn })
+          store
+            .getByName(stack)
+            .remove({ stage, fqn })
             .pipe(
               Effect.asVoid,
               Effect.withSpan("state_store.deleteState", {
                 attributes: {
                   "alchemy.state_store.op": "deleteState",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
                   "alchemy.state_store.fqn": fqn,
                 },
               }),
-            );
-        })
-        .handle("getReplacedResources", ({ params }) =>
-          store
-            .getByName(params.stack)
-            .getReplacedResources({ stage: params.stage })
-            .pipe(
-              Effect.withSpan("state_store.getReplacedResources", {
-                attributes: {
-                  "alchemy.state_store.op": "getReplacedResources",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
-                },
-              }),
             ),
-        )
-        .handle("getStackOutput", ({ params }) =>
+        deleteStack: ({ stack, stage }) =>
           store
-            .getByName(params.stack)
-            .getOutput({ stage: params.stage })
-            .pipe(
-              Effect.withSpan("state_store.getStackOutput", {
-                attributes: {
-                  "alchemy.state_store.op": "getStackOutput",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
-                },
-              }),
-            ),
-        )
-        .handle("setStackOutput", ({ params, payload }) =>
-          store
-            .getByName(params.stack)
-            .setOutput({ stage: params.stage, value: payload as any })
-            .pipe(
-              Effect.tap(() =>
-                store
-                  .getByName(Store.ROOT_DO_NAME)
-                  .registerStack({ stack: params.stack }),
-              ),
-              Effect.withSpan("state_store.setStackOutput", {
-                attributes: {
-                  "alchemy.state_store.op": "setStackOutput",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": params.stage,
-                },
-              }),
-            ),
-        )
-        .handle("deleteStack", ({ params, query }) =>
-          store
-            .getByName(params.stack)
-            .deleteStack(
-              query.stage === undefined ? {} : { stage: query.stage },
-            )
+            .getByName(stack)
+            .deleteStack(stage === undefined ? {} : { stage })
             .pipe(
               Effect.flatMap(() =>
-                query.stage === undefined
+                stage === undefined
                   ? store
                       .getByName(Store.ROOT_DO_NAME)
-                      .unregisterStack({ stack: params.stack })
+                      .unregisterStack({ stack })
                   : Effect.void,
               ),
               Effect.asVoid,
               Effect.withSpan("state_store.deleteStack", {
                 attributes: {
                   "alchemy.state_store.op": "deleteStack",
-                  "alchemy.state_store.stack": params.stack,
-                  "alchemy.state_store.stage": query.stage ?? "",
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage ?? "",
                   "alchemy.state_store.scope":
-                    query.stage === undefined ? "stack" : "stage",
+                    stage === undefined ? "stack" : "stage",
                 },
               }),
             ),
-        ),
+        getReplacedResources: ({ stack, stage }) =>
+          store
+            .getByName(stack)
+            .getReplacedResources({ stage })
+            .pipe(
+              Effect.withSpan("state_store.getReplacedResources", {
+                attributes: {
+                  "alchemy.state_store.op": "getReplacedResources",
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
+                },
+              }),
+            ),
+        getStackOutput: ({ stack, stage }) =>
+          store
+            .getByName(stack)
+            .getOutput({ stage })
+            .pipe(
+              Effect.withSpan("state_store.getStackOutput", {
+                attributes: {
+                  "alchemy.state_store.op": "getStackOutput",
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
+                },
+              }),
+            ),
+        setStackOutput: ({ stack, stage, value }) =>
+          store
+            .getByName(stack)
+            .setOutput({ stage, value: value as any })
+            .pipe(
+              Effect.tap(() =>
+                store.getByName(Store.ROOT_DO_NAME).registerStack({ stack }),
+              ),
+              Effect.withSpan("state_store.setStackOutput", {
+                attributes: {
+                  "alchemy.state_store.op": "setStackOutput",
+                  "alchemy.state_store.stack": stack,
+                  "alchemy.state_store.stage": stage,
+                },
+              }),
+            ),
+      }),
+    );
+
+    const rpcHandler = yield* RpcServer.toHttpEffect(StateRpcs).pipe(
+      Effect.provide(StateRpcsLive),
+      Effect.provide(RpcSerialization.layerJson),
     );
 
     return {
-      fetch: HttpApiBuilder.layer(StateApi).pipe(
-        Layer.provide(stateApi),
-        Layer.provide(versionApi),
-        Layer.provide(StateAuthLive),
-        Layer.provide(bearerTokenValidator),
-        // The state-store worker never serves files, so HttpPlatform's
-        // file-response surface is stubbed.
-        Layer.provide([Etag.layer, HttpPlatformStub, Path.layer]),
-        HttpRouter.toHttpEffect,
-        // Effect.provide(TelemetryLive),
-      ),
+      fetch: Effect.gen(function* () {
+        const req = yield* HttpServerRequest.HttpServerRequest;
+        const path = pathnameOf(req.url);
+
+        // Unauthenticated version probe.
+        if (path === "/version") {
+          return yield* HttpServerResponse.json({
+            version: STATE_STORE_VERSION,
+          });
+        }
+
+        // Bearer-token gate on every other route.
+        const expected = yield* secret.get().pipe(Effect.orDie);
+        const authHeader = req.headers.authorization ?? "";
+        const provided = authHeader.toLowerCase().startsWith("bearer ")
+          ? authHeader.slice(7).trim()
+          : "";
+        if (!expected || !timingSafeEqual(provided, expected)) {
+          return HttpServerResponse.empty({ status: 401 });
+        }
+
+        if (path === RPC_PATH) {
+          return yield* rpcHandler;
+        }
+
+        return HttpServerResponse.empty({ status: 404 });
+      }),
     };
   }).pipe(Effect.provide(Layer.mergeAll(SecretBindingLive))),
 );
 
-/**
- * Stub `HttpPlatform` for the worker. The state-store API never
- * issues file responses, so both surface methods die if invoked. Lets
- * us avoid pulling in a `FileSystem` dependency that workers don't
- * have.
- */
-const HttpPlatformStub = Layer.succeed(HttpPlatform.HttpPlatform, {
-  fileResponse: () => Effect.die("HttpPlatform.fileResponse not supported"),
-  fileWebResponse: () =>
-    Effect.die("HttpPlatform.fileWebResponse not supported"),
-});
+/** Extract the pathname from a request URL that may be relative or absolute. */
+const pathnameOf = (url: string): string => {
+  try {
+    return new URL(url, "http://localhost").pathname;
+  } catch {
+    const q = url.indexOf("?");
+    return q >= 0 ? url.slice(0, q) : url;
+  }
+};
 
 /**
  * Timing-safe string comparison using the Workers runtime's built-in

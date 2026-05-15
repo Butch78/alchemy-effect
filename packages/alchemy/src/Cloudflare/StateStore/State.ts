@@ -6,7 +6,6 @@ import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
 import crypto from "node:crypto";
 import * as Output from "../../Output.ts";
 
@@ -21,11 +20,10 @@ import { ALCHEMY_PROFILE, ProfileLive } from "../../Auth/Profile.ts";
 import * as Cloudflare from "../../Cloudflare/Providers.ts";
 import { deploy } from "../../Deploy.ts";
 import * as Alchemy from "../../Stack.ts";
-import { StateApi } from "../../State/HttpStateApi.ts";
 import {
-  makeHttpStateStore,
-  type HttpStateStoreCredentials,
-} from "../../State/HttpStateStore.ts";
+  makeRpcStateStore,
+  type RpcStateStoreCredentials,
+} from "../../State/RpcStateStore.ts";
 import * as CloudflareEnvironment from "../CloudflareEnvironment.ts";
 import * as Credentials from "../Credentials.ts";
 
@@ -166,7 +164,7 @@ export const bootstrap = (options: BootstrapOptions = {}) =>
       const credentials = yield* loginWithCloudflare();
       if (!isCI) {
         const store = yield* CredentialsStore;
-        yield* store.write<HttpStateStoreCredentials>(
+        yield* store.write<RpcStateStoreCredentials>(
           profileName,
           CREDENTIALS_FILE,
           credentials,
@@ -211,7 +209,7 @@ export const state = () =>
       const alchemyContext = yield* AlchemyContext;
       const profileName = yield* ALCHEMY_PROFILE;
       const store = yield* CredentialsStore;
-      const credentials = yield* store.read<HttpStateStoreCredentials>(
+      const credentials = yield* store.read<RpcStateStoreCredentials>(
         profileName,
         CREDENTIALS_FILE,
       );
@@ -298,7 +296,7 @@ export const state = () =>
         // it exists, so fetch the secret token
         const credentials = yield* loginWithCloudflare();
         if (!isCI) {
-          yield* store.write<HttpStateStoreCredentials>(
+          yield* store.write<RpcStateStoreCredentials>(
             profileName,
             CREDENTIALS_FILE,
             credentials,
@@ -367,7 +365,7 @@ const makeCloudflareStateStore = Effect.fnUntraced(function* ({
 }) {
   const access = yield* Access.Access;
   const accessHeaders = yield* access.getAccessHeaders(new URL(url).host);
-  return yield* makeHttpStateStore({
+  return yield* makeRpcStateStore({
     url,
     authToken,
     transformClient: HttpClientRequest.setHeaders(accessHeaders),
@@ -593,7 +591,7 @@ export const loginWithCloudflare = () =>
       //    `loadOrConfigure` when this is invoked through `configure`.
       const credStore = yield* CredentialsStore;
       yield* credStore
-        .write<HttpStateStoreCredentials>(profileName, CREDENTIALS_FILE, {
+        .write<RpcStateStoreCredentials>(profileName, CREDENTIALS_FILE, {
           url,
           authToken: authToken.trim(),
         })
@@ -743,14 +741,16 @@ const waitForStateStoreVersion = (url: string) =>
 
 const checkStateStoreVersion = (url: string) =>
   Effect.gen(function* () {
-    const client = yield* HttpApiClient.make(StateApi, { baseUrl: url });
+    const http = yield* HttpClient.HttpClient;
     // The /version route may 404 transiently after a fresh deploy
     // while Cloudflare propagates the new script to the edge, and may
     // also surface transport-level blips on cold workers.dev hosts.
     // Retry the probe itself for ~10s before giving up — only after
     // exhausting that budget do we collapse to `undefined` and let
     // the caller treat it as a version mismatch.
-    const result = yield* client.version.getVersion().pipe(
+    const result = yield* http.get(`${url}/version`).pipe(
+      Effect.flatMap((res) => res.json),
+      Effect.map((body) => body as { version: number }),
       Effect.retry({
         schedule: Schedule.spaced("250 millis").pipe(
           Schedule.both(Schedule.recurs(40)),
