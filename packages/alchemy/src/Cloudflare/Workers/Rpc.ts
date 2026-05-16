@@ -3,13 +3,25 @@ import type * as cf from "@cloudflare/workers-types";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as Socket from "effect/unstable/socket/Socket";
+import * as RpcClientError from "effect/unstable/rpc/RpcClientError";
+import {
+  RpcClient,
+  type RpcGroup,
+  type Rpc,
+  RpcSchema,
+  RpcSerialization,
+} from "effect/unstable/rpc";
 import type { HttpEffect } from "../../Http.ts";
 import { isYieldableEffect } from "../../Util/effect.ts";
-import { fromCloudflareFetcher } from "../Fetcher.ts";
+import { fromCloudflareFetcher, type Fetcher } from "../Fetcher.ts";
 import { serveWebRequest } from "./HttpServer.ts";
 import type { ExtractRpcShape, RpcPromiseShape } from "./InferEnv.ts";
 import { fromWebSocket } from "./WebSocket.ts";
@@ -644,36 +656,53 @@ const appendStreamErrors = (s: Stream.Stream<string, unknown>) =>
     ),
   );
 
+/**
+ * Serialize one JSONL line. We replace `undefined` with `null` so that
+ * schema-required keys (e.g. `Schema.UndefinedOr(T)` fields) survive the
+ * DO → worker JSON hop. Raw `JSON.stringify` drops `undefined`-valued keys
+ * entirely, which then fails downstream schema decoding with "Missing key".
+ */
+const encodeJsonLine = (value: unknown): string =>
+  `${JSON.stringify(value, (_key, v) => (v === undefined ? null : v))}\n`;
+
 export const toRpcStream = (stream: Stream.Stream<any, any, any>) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const [head, rest] = yield* Stream.peel(stream, Sink.head());
+  Effect.gen(function* () {
+    // The peeled `rest` stream is "only valid within the scope" (see
+    // JSDoc on `Stream.peel`). We can't use `Effect.scoped` here because
+    // that closes the scope before the consumer pulls — instead we open
+    // a fresh scope, peel under it, and use `Stream.ensuring` to tie the
+    // scope's lifetime to the body stream's finalizers (success, error,
+    // and interrupt all converge on stream-end).
+    const scope = yield* Scope.make();
+    const closeScope = Scope.close(scope, Exit.void);
+    const [head, rest] = yield* Stream.peel(stream, Sink.head()).pipe(
+      Scope.provide(scope),
+    );
 
-      if (Option.isSome(head) && head.value instanceof Uint8Array) {
-        return {
-          _tag: StreamTag,
-          encoding: "bytes",
-          body: Stream.toReadableStream(
-            rest.pipe(Stream.prepend([head.value])),
-          ),
-        } satisfies RpcStreamEnvelope;
-      }
-
-      const body = Option.isSome(head)
-        ? rest.pipe(Stream.prepend([head.value]))
-        : rest;
-
+    if (Option.isSome(head) && head.value instanceof Uint8Array) {
       return {
         _tag: StreamTag,
-        encoding: "jsonl",
+        encoding: "bytes",
         body: Stream.toReadableStream(
-          appendStreamErrors(
-            body.pipe(Stream.map((value) => JSON.stringify(value) + "\n")),
-          ).pipe(Stream.encodeText),
+          rest.pipe(Stream.prepend([head.value]), Stream.ensuring(closeScope)),
         ),
       } satisfies RpcStreamEnvelope;
-    }),
-  ).pipe(
+    }
+
+    const body = Option.isSome(head)
+      ? rest.pipe(Stream.prepend([head.value]))
+      : rest;
+
+    return {
+      _tag: StreamTag,
+      encoding: "jsonl",
+      body: Stream.toReadableStream(
+        appendStreamErrors(
+          body.pipe(Stream.map((value) => encodeJsonLine(value))),
+        ).pipe(Stream.encodeText, Stream.ensuring(closeScope)),
+      ),
+    } satisfies RpcStreamEnvelope;
+  }).pipe(
     Effect.catchCause((cause) => {
       const failReason = cause.reasons.find(Cause.isFailReason);
       if (failReason) {
@@ -690,3 +719,82 @@ export const toRpcStream = (stream: Stream.Stream<any, any, any>) =>
       return Effect.die(Cause.squash(cause));
     }),
   );
+
+/**
+ * Drop-in replacement for alchemy's built-in DO RPC namespace — but the
+ * wire format is Effect's NDJSON `RpcSerialization`, which round-trips
+ * `Schema.Class` instances cleanly (the built-in bridge `JSON.stringify`s
+ * each value and loses class identity).
+ *
+ * Pair it with `RpcServer.toHttpEffect(group)` on the DO's `fetch`
+ * handler; this helper builds the matching client side and exposes the
+ * same `namespace.getByName(id)` shape so the call-site looks identical
+ * to the built-in bridge:
+ *
+ * @example
+ * ```ts
+ * // alchemy.run / Worker init
+ * const agents = yield* ChatAgent
+ * const agentsRpc = yield* Cloudflare.bindEffectRpc(agents, AgentRpcs)
+ *
+ * // anywhere in the worker, sync method call
+ * agentsRpc.getByName(id).sendChat({ threadId, prompt })   // Stream<StreamPart>
+ * agentsRpc.getByName(id).getMessages({ threadId })        // Effect<MessagesResponse>
+ * ```
+ *
+ * The URL passed to `RpcClient.layerProtocolHttp` is a dummy — requests
+ * never leave the Worker isolate, every one is dispatched through the
+ * stub's `.fetch`.
+ */
+export const bindEffectRpc = <Rpcs extends Rpc.Any>(
+  // Accept any DO/service namespace shape — the runtime `fetch`
+  // implementation (via `fromCloudflareFetcher`) supports both
+  // `HttpClientRequest` and `HttpServerRequest`, even though alchemy's
+  // generated `DurableObjectStub` type only advertises the latter.
+  namespace: { readonly getByName: (id: string) => { readonly fetch: any } },
+  group: RpcGroup.RpcGroup<Rpcs>,
+  options?: {
+    /**
+     * Override the rpc serialization layer. Defaults to NDJSON, which
+     * is required when any rpc in the group is a streaming rpc.
+     */
+    readonly serialization?: Layer.Layer<RpcSerialization.RpcSerialization>;
+  },
+): {
+  readonly getByName: (
+    id: string,
+  ) => Effect.Effect<
+    RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError>,
+    never,
+    Scope.Scope | Rpc.MiddlewareClient<Rpcs>
+  >;
+} => {
+  const serialization = options?.serialization ?? RpcSerialization.layerNdjson;
+  // A fresh `RpcClient` is built per call. Caching is tempting (clients
+  // are heavyweight) but Cloudflare workers reject I/O objects (the
+  // `stub.fetch` body) that were created on a previous request — any
+  // cached client breaks the moment the second request comes in with:
+  //   "Cannot perform I/O on behalf of a different request"
+  // `RpcClient.make` only wires Effect services; the actual HTTP
+  // round-trip is the same one a hand-written `fetch` would do.
+  return {
+    getByName: (id) => {
+      const httpClient = HttpClient.layerMergedContext(
+        Effect.sync(() => {
+          const stub = namespace.getByName(id);
+          return HttpClient.make((request) => stub.fetch(request));
+        }),
+      );
+      const protocol = RpcClient.layerProtocolHttp({
+        url: "http://alchemy-rpc/",
+      }).pipe(Layer.provide(serialization), Layer.provide(httpClient));
+      return RpcClient.make(group).pipe(
+        Effect.provide(protocol),
+      ) as Effect.Effect<
+        RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError>,
+        never,
+        Scope.Scope | Rpc.MiddlewareClient<Rpcs>
+      >;
+    },
+  };
+};

@@ -18,6 +18,8 @@ export type SecretInput<R = never> =
   | Effect.Effect<string | Redacted.Redacted<string>, any, R>
   | Config.Config<string | Redacted.Redacted<string>>;
 
+export type Secret<R = never> = Output.Output<Redacted.Redacted<string>, R>;
+
 /**
  * Bind a secret value into the active {@link RuntimeContext} (e.g. a
  * Cloudflare Worker's `env`) under the given `name` so the resource
@@ -49,17 +51,15 @@ export type SecretInput<R = never> =
  * const apiKey = yield* Alchemy.Secret("API_KEY", Config.redacted("API_KEY"));
  * ```
  */
-export function Secret(
-  name: string,
-): Output.Output<Redacted.Redacted<string>, never>;
+export function Secret(name: string): Secret<never>;
 export function Secret<R = never>(
   name: string,
   value: SecretInput<R>,
-): Output.Output<Redacted.Redacted<string>, R>;
+): Secret<R>;
 export function Secret<R = never>(
   name: string,
   value?: SecretInput<R>,
-): Output.Output<Redacted.Redacted<string>, R> {
+): Secret<R> {
   const source = value ?? Config.redacted(name);
   const base = toOutput<string | Redacted.Redacted<string>, R>(source);
   return Output.named(

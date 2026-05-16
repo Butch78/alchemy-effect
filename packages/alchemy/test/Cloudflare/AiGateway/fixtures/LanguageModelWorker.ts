@@ -62,6 +62,38 @@ export default class LanguageModelTestWorker extends Cloudflare.Worker<LanguageM
     });
     const chatAgents = yield* ChatAgent;
 
+    const dumpRawStream = (
+      model: string,
+      messages: ReadonlyArray<{ role: string; content: string }>,
+      streamOptions: Record<string, unknown> | undefined,
+    ) =>
+      Effect.gen(function* () {
+        const ai = yield* aiGateway.raw;
+        const gatewayId = yield* aiGateway.id;
+        const response = yield* Effect.tryPromise({
+          try: () =>
+            ai.run(
+              model as keyof AiModels,
+              {
+                messages,
+                stream: true,
+                ...streamOptions,
+              } as unknown as AiModels[keyof AiModels]["inputs"],
+              { gateway: { id: gatewayId }, returnRawResponse: true },
+            ),
+          catch: (e) => e,
+        });
+        if (response.body == null)
+          return HttpServerResponse.text("no body", { status: 500 });
+        const body = Stream.fromReadableStream<Uint8Array, never>({
+          evaluate: () => response.body!,
+          onError: () => undefined as never,
+        });
+        return HttpServerResponse.stream(body, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      }).pipe(Effect.orDie);
+
     return {
       fetch: Effect.gen(function* () {
         const request = yield* HttpServerRequest;
@@ -100,6 +132,18 @@ export default class LanguageModelTestWorker extends Cloudflare.Worker<LanguageM
               outputTokens: response.usage.outputTokens.total,
             },
           });
+        }
+
+        if (url.pathname === "/raw-stream") {
+          const model = url.searchParams.get("model") ?? MODEL;
+          const includeUsage = url.searchParams.get("include_usage") === "1";
+          return yield* dumpRawStream(
+            model,
+            [{ role: "user", content: prompt }],
+            includeUsage
+              ? { stream_options: { include_usage: true } }
+              : undefined,
+          );
         }
 
         if (url.pathname === "/test-stream") {

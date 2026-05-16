@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["alchemy.run.ts", "src/**/*.ts", "src/**/*.tsx"],
+  "include": ["alchemy.run.ts", "src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"],
   "compilerOptions": {
     "noEmit": true,
     "rootDir": ".",

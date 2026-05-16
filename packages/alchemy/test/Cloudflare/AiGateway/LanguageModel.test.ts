@@ -39,6 +39,25 @@ const Stack = Alchemy.Stack(
 const stack = beforeAll(deploy(Stack));
 afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack));
 
+type StreamPart = {
+  type: string;
+  id?: string;
+  name?: string;
+  delta?: string;
+  reason?: string;
+  usage?: {
+    inputTokens?: { total?: number };
+    outputTokens?: { total?: number };
+  };
+};
+
+const parseSse = (sse: string): ReadonlyArray<StreamPart> =>
+  sse
+    .split("\n\n")
+    .map((frame) => frame.replace(/^data:\s*/, "").trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as StreamPart);
+
 test(
   "deployed worker generates text via AiGateway-backed LanguageModel",
   Effect.gen(function* () {
@@ -66,8 +85,13 @@ test(
 
     expect(typeof body.text).toBe("string");
     expect(body.text.length).toBeGreaterThan(0);
-    expect(body.finishReason).not.toBe("error");
+    // Refactor invariant: `mapUsage` must populate both input and output
+    // tokens from Workers AI's `prompt_tokens` / `completion_tokens` fields.
+    expect(body.usage.inputTokens).toBeGreaterThan(0);
     expect(body.usage.outputTokens).toBeGreaterThan(0);
+    // Refactor invariant: a normal completion maps to `stop`, not `unknown` /
+    // `other` / `error`.
+    expect(body.finishReason).toBe("stop");
   }).pipe(logLevel),
   { timeout: 180_000 },
 );
@@ -88,13 +112,7 @@ test(
       );
     expect(res.status).toBe(200);
 
-    const sse = yield* res.text;
-    const parts = sse
-      .split("\n\n")
-      .map((frame) => frame.replace(/^data:\s*/, "").trim())
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as { type: string; delta?: string });
-
+    const parts = parseSse(yield* res.text);
     const text = parts
       .filter((p) => p.type === "text-delta")
       .map((p) => p.delta ?? "")
@@ -104,6 +122,145 @@ test(
     expect(parts.length).toBeGreaterThan(0);
     expect(text.length).toBeGreaterThan(0);
     expect(finish).toBeDefined();
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "streamed parts respect ordering: text-start → text-delta+ → text-end → finish",
+  Effect.gen(function* () {
+    const out = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    const res = yield* client
+      .get(`${out.url}/stream?prompt=${encodeURIComponent("Say pong.")}`)
+      .pipe(
+        Effect.retry({
+          schedule: Schedule.exponential("500 millis"),
+          times: 10,
+        }),
+      );
+    expect(res.status).toBe(200);
+
+    const parts = parseSse(yield* res.text);
+    const indexOfType = (type: string) =>
+      parts.findIndex((p) => p.type === type);
+    const lastIndexOfType = (type: string) => {
+      for (let i = parts.length - 1; i >= 0; i--) {
+        if (parts[i]!.type === type) return i;
+      }
+      return -1;
+    };
+
+    // Refactor invariant: `emitTextDelta` opens a text-start before the first
+    // text-delta, `finalizeStream` emits text-end before the final finish.
+    const startIdx = indexOfType("text-start");
+    const firstDeltaIdx = indexOfType("text-delta");
+    const lastDeltaIdx = lastIndexOfType("text-delta");
+    const endIdx = indexOfType("text-end");
+    const finishIdx = indexOfType("finish");
+
+    expect(startIdx).toBeGreaterThanOrEqual(0);
+    expect(firstDeltaIdx).toBeGreaterThan(startIdx);
+    expect(endIdx).toBeGreaterThan(lastDeltaIdx);
+    expect(finishIdx).toBe(parts.length - 1);
+    expect(finishIdx).toBeGreaterThan(endIdx);
+
+    // Exactly one text segment was opened and closed.
+    expect(parts.filter((p) => p.type === "text-start")).toHaveLength(1);
+    expect(parts.filter((p) => p.type === "text-end")).toHaveLength(1);
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test.skipIf(!process.env.DEBUG_RAW_STREAM)(
+  "DEBUG: dump raw Workers AI SSE stream",
+  Effect.gen(function* () {
+    const out = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+    const fs = yield* Effect.promise(() => import("node:fs"));
+    const print = (s: string) => fs.writeSync(2, s);
+
+    for (const includeUsage of ["0", "1"] as const) {
+      const res = yield* client
+        .get(
+          `${out.url}/raw-stream?include_usage=${includeUsage}&prompt=${encodeURIComponent("Say pong.")}`,
+        )
+        .pipe(
+          Effect.retry({
+            schedule: Schedule.exponential("500 millis"),
+            times: 10,
+          }),
+        );
+      print(`\n=== include_usage=${includeUsage} ===\n`);
+      print(yield* res.text);
+      print("\n=== end ===\n");
+    }
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "stream finish part reports the real token counts and a `stop` reason",
+  Effect.gen(function* () {
+    const out = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    const res = yield* client
+      .get(
+        `${out.url}/stream?prompt=${encodeURIComponent("Say the word 'pong' and nothing else.")}`,
+      )
+      .pipe(
+        Effect.retry({
+          schedule: Schedule.exponential("500 millis"),
+          times: 10,
+        }),
+      );
+    expect(res.status).toBe(200);
+
+    const parts = parseSse(yield* res.text);
+    const finish = parts.find((p) => p.type === "finish");
+    expect(finish).toBeDefined();
+    // Workers AI emits the real usage chunk and then a zero-valued
+    // "terminator" usage chunk; the refactor must keep the real one (see
+    // `hasNonZeroUsage` in updateChunkMeta).
+    expect(finish?.usage?.inputTokens?.total).toBeGreaterThan(0);
+    expect(finish?.usage?.outputTokens?.total).toBeGreaterThan(0);
+    // Workers AI's native stream shape never emits `finish_reason`; a clean
+    // `[DONE]` must still surface as "stop" rather than "unknown".
+    expect(finish?.reason).toBe("stop");
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "stream emits multiple text-delta chunks for a long-form response",
+  Effect.gen(function* () {
+    const out = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    const res = yield* client
+      .get(
+        `${out.url}/stream?prompt=${encodeURIComponent(
+          "Write a short paragraph (around 80 words) about why TypeScript developers might enjoy Effect TS.",
+        )}`,
+      )
+      .pipe(
+        Effect.retry({
+          schedule: Schedule.exponential("500 millis"),
+          times: 10,
+        }),
+      );
+    expect(res.status).toBe(200);
+
+    const parts = parseSse(yield* res.text);
+    const deltas = parts.filter((p) => p.type === "text-delta");
+    // Refactor invariant: each model SSE chunk produces a text-delta — so a
+    // long response should produce many. A single fused delta would mean we
+    // accidentally buffered the stream.
+    expect(deltas.length).toBeGreaterThan(3);
+    const total = deltas.map((p) => p.delta ?? "").join("").length;
+    expect(total).toBeGreaterThan(20);
   }).pipe(logLevel),
   { timeout: 180_000 },
 );
@@ -226,29 +383,80 @@ test(
       );
     expect(res.status).toBe(200);
 
-    const sse = yield* res.text;
-    const parts = sse
-      .split("\n\n")
-      .map((frame) => frame.replace(/^data:\s*/, "").trim())
-      .filter((line) => line.length > 0)
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            type: string;
-            name?: string;
-            delta?: string;
-            id?: string;
-          },
-      );
-
+    const parts = parseSse(yield* res.text);
     const toolParamsStart = parts.filter((p) => p.type === "tool-params-start");
     const toolParamsDeltas = parts.filter(
       (p) => p.type === "tool-params-delta",
     );
+    const toolParamsEnd = parts.filter((p) => p.type === "tool-params-end");
 
     expect(toolParamsStart.length).toBeGreaterThan(0);
-    expect((toolParamsStart[0] as { name?: string }).name).toBe("get_weather");
+    expect(toolParamsStart[0]?.name).toBe("get_weather");
     expect(toolParamsDeltas.length).toBeGreaterThan(0);
+
+    // Refactor invariant: `finalizeStream` closes any tool calls still open
+    // when the stream ends, emitting one `tool-params-end` per opened call.
+    expect(toolParamsEnd.length).toBe(toolParamsStart.length);
+    // Each start is matched to an end by id.
+    const startIds = new Set(toolParamsStart.map((p) => p.id));
+    const endIds = new Set(toolParamsEnd.map((p) => p.id));
+    expect(endIds).toEqual(startIds);
+
+    // Ordering: every tool-params-end comes after its corresponding start,
+    // every delta with the same id falls between start and end, and finish
+    // is last.
+    const indexOf = (type: string, id: string | undefined) =>
+      parts.findIndex((p) => p.type === type && p.id === id);
+    for (const start of toolParamsStart) {
+      const startIdx = indexOf("tool-params-start", start.id);
+      const endIdx = indexOf("tool-params-end", start.id);
+      expect(endIdx).toBeGreaterThan(startIdx);
+      for (const delta of toolParamsDeltas.filter((p) => p.id === start.id)) {
+        const dIdx = parts.indexOf(delta);
+        expect(dIdx).toBeGreaterThan(startIdx);
+        expect(dIdx).toBeLessThan(endIdx);
+      }
+    }
+    expect(parts[parts.length - 1]?.type).toBe("finish");
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "concatenated tool-params-delta payloads parse back into the requested arguments",
+  Effect.gen(function* () {
+    const out = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    const res = yield* client
+      .get(
+        `${out.url}/tool-stream?prompt=${encodeURIComponent(
+          "What's the weather in Portland?",
+        )}`,
+      )
+      .pipe(
+        Effect.retry({
+          schedule: Schedule.exponential("500 millis"),
+          times: 10,
+        }),
+      );
+    expect(res.status).toBe(200);
+
+    const parts = parseSse(yield* res.text);
+    const toolParamsStart = parts.filter((p) => p.type === "tool-params-start");
+    expect(toolParamsStart.length).toBeGreaterThan(0);
+    const firstId = toolParamsStart[0]!.id!;
+
+    // Refactor invariant: `handleToolDeltas` emits each `arguments` fragment
+    // as a `tool-params-delta` in order; concatenating them yields a valid
+    // JSON document with the originally-requested fields.
+    const joined = parts
+      .filter((p) => p.type === "tool-params-delta" && p.id === firstId)
+      .map((p) => p.delta ?? "")
+      .join("");
+    const args = JSON.parse(joined) as { city?: string };
+    expect(typeof args.city).toBe("string");
+    expect(args.city!.toLowerCase()).toContain("portland");
   }).pipe(logLevel),
   { timeout: 180_000 },
 );

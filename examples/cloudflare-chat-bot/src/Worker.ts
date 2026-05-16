@@ -1,96 +1,79 @@
 import * as Cloudflare from "alchemy/Cloudflare";
+import { Layer } from "effect";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
-import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import ChatAgent, { isModelOption, type ModelOption } from "./Agent.ts";
+import * as Stream from "effect/Stream";
+import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+import ChatAgent from "./Agent.ts";
+import { ChatRpcs, InternalError } from "./Api.ts";
 
-const corsHeaders = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, OPTIONS",
-  "access-control-allow-headers": "content-type",
-};
+const toInternalError =
+  (label: string) =>
+  <A, R>(
+    effect: Effect.Effect<A, unknown, R>,
+  ): Effect.Effect<A, InternalError, R> =>
+    Effect.catchCause(effect, (cause) =>
+      Effect.logError(`${label} failed`, cause).pipe(
+        Effect.andThen(
+          Effect.fail(new InternalError({ message: Cause.pretty(cause) })),
+        ),
+      ),
+    );
 
-const json = (body: unknown, init?: { status?: number }) =>
-  HttpServerResponse.json(body, {
-    status: init?.status,
-    headers: corsHeaders,
-  });
+const streamToInternalError =
+  (label: string) =>
+  <A, R>(
+    stream: Stream.Stream<A, unknown, R>,
+  ): Stream.Stream<A, InternalError, R> =>
+    stream.pipe(
+      Stream.catchCause((cause) =>
+        Effect.logError(`${label} stream failed`, cause).pipe(
+          Effect.andThen(
+            Effect.fail(new InternalError({ message: Cause.pretty(cause) })),
+          ),
+          Stream.fromEffect,
+        ),
+      ),
+    );
 
 /**
- * Backend Worker for the chat bot SPA.
+ * Backend Worker for the chat bot SPA. `RpcWorker` takes the `ChatRpcs`
+ * schema and an init Effect that returns the already-piped
+ * `RpcServer.toHttpEffect(...)`; the wrapper just exposes it on the
+ * worker's `fetch`.
  *
- * Routes:
- * - `POST /api/chat?id=:sessionId&threadId=:threadId` — send a prompt, get the
- *   assistant reply plus the full conversation history.
- * - `GET  /api/messages?id=:sessionId&threadId=:threadId` — fetch the existing
- *   conversation for a session/thread.
- * - `POST /api/reset?id=:sessionId&threadId=:threadId` — clear the thread.
- *
- * Every session maps to a single `ChatAgent` Durable Object instance
- * (`agents.getByName(id)`), so history is naturally per-session. The DO holds
- * the Effect-native `Chat` with persistence wired to the DO's own storage.
+ * Each per-session call is forwarded to the matching
+ * `ChatAgent.getByName(id)` rpc procedure (typed by `RpcDurableObjectNamespace`),
+ * so values round-trip through one `Schema` codec end-to-end —
+ * `Schema.Class` identity preserved.
  */
-export default class Worker extends Cloudflare.Worker<Worker>()(
+export default class Worker extends Cloudflare.RpcWorker<Worker>()(
   "Worker",
-  {
-    main: import.meta.filename,
-  },
+  { main: import.meta.filename, schema: ChatRpcs },
   Effect.gen(function* () {
-    const agents = yield* ChatAgent;
+    const chatAgents = yield* ChatAgent;
 
-    return {
-      fetch: Effect.gen(function* () {
-        const request = yield* HttpServerRequest;
-        const url = new URL(request.url, "http://worker");
+    const chatRpc = ChatRpcs.toLayer({
+      sendChat: ({ id, threadId, prompt, model }) =>
+        chatAgents.getByName(id).pipe(
+          Effect.map((agent) => agent.sendChat({ threadId, prompt, model })),
+          Stream.unwrap,
+          streamToInternalError("sendChat"),
+        ),
+      getMessages: ({ id, threadId }) =>
+        chatAgents.getByName(id).pipe(
+          Effect.flatMap((agent) => agent.getMessages({ threadId })),
+          toInternalError("getMessages"),
+        ),
+      resetThread: ({ id, threadId }) =>
+        chatAgents.getByName(id).pipe(
+          Effect.flatMap((agent) => agent.resetThread({ threadId })),
+          toInternalError("resetThread"),
+        ),
+    });
 
-        if (request.method === "OPTIONS") {
-          return HttpServerResponse.empty({
-            status: 204,
-            headers: corsHeaders,
-          });
-        }
-
-        const id = url.searchParams.get("id") ?? "default";
-        const threadId = url.searchParams.get("threadId") ?? "default";
-        const agent = agents.getByName(id);
-
-        if (url.pathname === "/api/chat" && request.method === "POST") {
-          const body = (yield* request.json) as {
-            prompt?: string;
-            model?: string;
-          };
-          const prompt = body.prompt?.trim();
-          if (!prompt) {
-            return yield* json(
-              { error: "prompt is required" },
-              { status: 400 },
-            );
-          }
-          const model: ModelOption = isModelOption(body.model)
-            ? body.model
-            : "kimi";
-          return yield* agent
-            .send(threadId, prompt, model)
-            .pipe(Effect.flatMap((result) => json(result)));
-        }
-
-        if (url.pathname === "/api/messages" && request.method === "GET") {
-          return yield* agent
-            .messages(threadId)
-            .pipe(Effect.flatMap((result) => json(result)));
-        }
-
-        if (url.pathname === "/api/reset" && request.method === "POST") {
-          return yield* agent
-            .reset(threadId)
-            .pipe(Effect.flatMap((result) => json(result)));
-        }
-
-        return HttpServerResponse.text("Not Found", {
-          status: 404,
-          headers: corsHeaders,
-        });
-      }),
-    };
+    return RpcServer.toHttpEffect(ChatRpcs).pipe(
+      Effect.provide(Layer.mergeAll(chatRpc, RpcSerialization.layerNdjson)),
+    );
   }).pipe(Effect.provide(Cloudflare.AiGatewayBindingLive)),
 ) {}

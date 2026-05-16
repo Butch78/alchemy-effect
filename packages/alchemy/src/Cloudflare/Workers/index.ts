@@ -3,6 +3,8 @@ export * from "./ConfigProvider.ts";
 export * from "./CronEventSource.ts";
 export * from "./DurableObjectChatPersistence.ts";
 export * from "./DurableObjectNamespace.ts";
+export * from "./RpcDurableObjectNamespace.ts";
+export * from "./RpcWorker.ts";
 export * from "./DurableObjectState.ts";
 export * from "./DurableObjectStorage.ts";
 export * from "./DynamicWorkerLoader.ts";

@@ -1,8 +1,32 @@
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import type { ChatMessage, ModelOption } from "./Agent.ts";
+import { ChatRpcs } from "./Api.ts";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8787";
+
+const ClientLayer = Layer.mergeAll(
+  RpcClient.layerProtocolHttp({ url: API_URL.replace(/\/+$/, "") }),
+  RpcSerialization.layerNdjson,
+  FetchHttpClient.layer,
+);
+
+const runClient = <A,>(
+  build: (client: any) => Effect.Effect<A, unknown, never>,
+): Promise<A> =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = yield* RpcClient.make(ChatRpcs);
+        return yield* build(client);
+      }).pipe(Effect.provide(ClientLayer)),
+    ) as Effect.Effect<A, unknown>,
+  );
 const SESSION_KEY = "chat-bot:session-id";
 const MODEL_KEY = "chat-bot:model";
 
@@ -138,18 +162,15 @@ function App() {
     localStorage.setItem(MODEL_KEY, model);
   }, [model]);
 
-  const url = (path: string) =>
-    `${API_URL}${path}?id=${encodeURIComponent(sessionId)}&threadId=default`;
+  const threadId = "default";
 
   React.useEffect(() => {
     let cancelled = false;
-    fetch(url("/api/messages"))
-      .then((r) =>
-        r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)),
-      )
+    runClient<{ messages: ReadonlyArray<ChatMessage> }>((client) =>
+      client.getMessages({ id: sessionId, threadId }),
+    )
       .then((data) => {
-        const { messages } = data as { messages: ReadonlyArray<ChatMessage> };
-        if (!cancelled) setMessages(messages ?? []);
+        if (!cancelled) setMessages(data.messages);
       })
       .catch((err) => {
         if (!cancelled) setError(String(err));
@@ -177,17 +198,28 @@ function App() {
     setMessages((prev) => [...prev, { role: "user", text: prompt }]);
 
     try {
-      const res = await fetch(url("/api/chat"), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ prompt, model }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-      const data = (await res.json()) as {
-        reply: string;
-        messages: ReadonlyArray<ChatMessage>;
-      };
-      setMessages(data.messages);
+      let reply = "";
+      await runClient((client) =>
+        client.sendChat({ id: sessionId, threadId, prompt, model }).pipe(
+          Stream.runForEach((part: { type: string; delta?: string }) =>
+            Effect.sync(() => {
+              if (part.type === "text-delta") {
+                reply += part.delta ?? "";
+                setMessages((prev) => {
+                  const out = prev.slice();
+                  const last = out[out.length - 1];
+                  if (last && last.role === "assistant") {
+                    out[out.length - 1] = { role: "assistant", text: reply };
+                  } else {
+                    out.push({ role: "assistant", text: reply });
+                  }
+                  return out;
+                });
+              }
+            }),
+          ),
+        ),
+      );
     } catch (err) {
       setError(String(err));
       setMessages((prev) => prev.slice(0, -1));
@@ -201,7 +233,9 @@ function App() {
     setBusy(true);
     setError(undefined);
     try {
-      await fetch(url("/api/reset"), { method: "POST" });
+      await runClient((client) =>
+        client.resetThread({ id: sessionId, threadId }),
+      );
       setMessages([]);
     } catch (err) {
       setError(String(err));

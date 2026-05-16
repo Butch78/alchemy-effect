@@ -15,7 +15,8 @@
     "dev": "doppler run -c dev --project alchemy-v2 -- alchemy dev",
     "destroy": "doppler run -c dev --project alchemy-v2 -- alchemy destroy",
     "logs": "alchemy logs",
-    "tail": "alchemy tail"
+    "tail": "alchemy tail",
+    "test": "doppler run -c dev --project alchemy-v2 -- bun test"
   },
   "dependencies": {
     "@effect/ai-anthropic": "catalog:",

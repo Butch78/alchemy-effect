@@ -91,19 +91,19 @@ export const makeLanguageModel = ({
       streamText: (options) =>
         Stream.unwrap(
           Effect.gen(function* () {
-            const idGenerator = yield* IdGenerator.IdGenerator;
+            const idGen = yield* IdGenerator.IdGenerator;
             const body = toRequestBody({ options, parameters, stream: true });
             const resp = yield* callRaw(body, "streamText");
-            return parseStreamText(resp, idGenerator);
+            return parseStreamText(resp, idGen);
           }),
         ),
     });
   });
 
 // ---------------------------------------------------------------------------
-// Wire format types (Workers AI request/response)
+// Wire format types (Workers AI request)
 //
-// Workers AI mixes two response shapes:
+// Workers AI returns two response shapes depending on the model:
 //   - Native:  { response: "...", tool_calls: [...] , usage }
 //   - OpenAI:  { choices: [{ message: { content, tool_calls, reasoning_content } }], usage }
 //
@@ -143,6 +143,7 @@ interface WorkersAiInputs {
   readonly tools?: ReadonlyArray<WorkersAiToolDef>;
   readonly tool_choice?: WorkersAiToolChoice;
   readonly stream?: boolean;
+  readonly stream_options?: { readonly include_usage: boolean };
   readonly max_tokens?: number;
   readonly temperature?: number;
   readonly top_p?: number;
@@ -153,7 +154,7 @@ interface WorkersAiInputs {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt → Workers AI messages
+// Prompt → Workers AI messages (pure, no .push mutation)
 // ---------------------------------------------------------------------------
 
 const uint8ArrayToBase64 = (bytes: Uint8Array): string => {
@@ -180,106 +181,96 @@ const fileToImageUrl = (
 
 const convertPromptToMessages = (
   prompt: Prompt.Prompt,
-): ReadonlyArray<WorkersAiMessage> => {
-  const messages: Array<WorkersAiMessage> = [];
-
-  for (const message of prompt.content) {
-    switch (message.role) {
-      case "system": {
-        messages.push({ role: "system", content: message.content });
-        break;
-      }
-      case "user": {
-        const textParts: Array<string> = [];
-        const imageParts: Array<{
-          type: "image_url";
-          image_url: { url: string };
-        }> = [];
-        for (const part of message.content) {
-          if (part.type === "text") {
-            textParts.push(part.text);
-          } else if (part.type === "file") {
-            imageParts.push({
-              type: "image_url",
-              image_url: {
-                url: fileToImageUrl(part.data, part.mediaType),
-              },
-            });
-          }
-        }
-        if (imageParts.length > 0) {
-          const content: Array<unknown> = [];
-          if (textParts.length > 0) {
-            content.push({ type: "text", text: textParts.join("\n") });
-          }
-          content.push(...imageParts);
-          messages.push({ role: "user", content });
-        } else {
-          messages.push({ role: "user", content: textParts.join("\n") });
-        }
-        break;
-      }
-      case "assistant": {
-        let text = "";
-        let reasoning = "";
-        const toolCalls: Array<{
-          id: string;
-          type: "function";
-          function: { name: string; arguments: string };
-        }> = [];
-        for (const part of message.content) {
-          switch (part.type) {
-            case "text":
-              text += part.text;
-              break;
-            case "reasoning":
-              reasoning += part.text;
-              break;
-            case "tool-call":
-              toolCalls.push({
-                id: part.id,
-                type: "function",
-                function: {
-                  name: part.name,
-                  arguments:
-                    typeof part.params === "string"
-                      ? part.params
-                      : JSON.stringify(part.params ?? {}),
-                },
-              });
-              break;
-            default:
-              break;
-          }
-        }
-        messages.push({
-          role: "assistant",
-          content: text,
-          ...(reasoning ? { reasoning } : {}),
-          ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-        });
-        break;
-      }
-      case "tool": {
-        for (const part of message.content) {
-          if (part.type === "tool-result") {
-            const result = part.result;
-            const content =
-              typeof result === "string" ? result : JSON.stringify(result);
-            messages.push({
-              role: "tool",
-              name: part.name,
-              tool_call_id: part.id,
-              content,
-            });
-          }
-        }
-        break;
-      }
+): ReadonlyArray<WorkersAiMessage> =>
+  prompt.content.flatMap((m): ReadonlyArray<WorkersAiMessage> => {
+    switch (m.role) {
+      case "system":
+        return [{ role: "system", content: m.content }];
+      case "user":
+        return [toUserMessage(m.content)];
+      case "assistant":
+        return [toAssistantMessage(m.content)];
+      case "tool":
+        return m.content.flatMap(toToolMessage);
     }
-  }
-  return messages;
+  });
+
+const toUserMessage = (
+  parts: Prompt.UserMessage["content"],
+): WorkersAiMessage => {
+  const text = parts
+    .flatMap((p) => (p.type === "text" ? [p.text] : []))
+    .join("\n");
+  const images = parts.flatMap((p) =>
+    p.type === "file"
+      ? [
+          {
+            type: "image_url" as const,
+            image_url: { url: fileToImageUrl(p.data, p.mediaType) },
+          },
+        ]
+      : [],
+  );
+  if (images.length === 0) return { role: "user", content: text };
+  return {
+    role: "user",
+    content: [
+      ...(text.length > 0 ? [{ type: "text" as const, text }] : []),
+      ...images,
+    ],
+  };
 };
+
+const toAssistantMessage = (
+  parts: Prompt.AssistantMessage["content"],
+): WorkersAiMessage => {
+  const text = parts
+    .flatMap((p) => (p.type === "text" ? [p.text] : []))
+    .join("");
+  const reasoning = parts
+    .flatMap((p) => (p.type === "reasoning" ? [p.text] : []))
+    .join("");
+  const toolCalls = parts.flatMap((p) =>
+    p.type === "tool-call"
+      ? [
+          {
+            id: p.id,
+            type: "function" as const,
+            function: {
+              name: p.name,
+              arguments:
+                typeof p.params === "string"
+                  ? p.params
+                  : JSON.stringify(p.params ?? {}),
+            },
+          },
+        ]
+      : [],
+  );
+  return {
+    role: "assistant",
+    content: text,
+    ...(reasoning ? { reasoning } : {}),
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  };
+};
+
+const toToolMessage = (
+  part: Prompt.ToolMessage["content"][number],
+): ReadonlyArray<WorkersAiMessage> =>
+  part.type === "tool-result"
+    ? [
+        {
+          role: "tool",
+          name: part.name,
+          tool_call_id: part.id,
+          content:
+            typeof part.result === "string"
+              ? part.result
+              : JSON.stringify(part.result),
+        },
+      ]
+    : [];
 
 // ---------------------------------------------------------------------------
 // Tools / tool_choice
@@ -292,10 +283,8 @@ const prepareTools = (
   tools?: ReadonlyArray<WorkersAiToolDef>;
   tool_choice?: WorkersAiToolChoice;
 } => {
-  if (tools.length === 0) {
-    return {};
-  }
-  const mapped: Array<WorkersAiToolDef> = tools.map((tool) => ({
+  if (tools.length === 0) return {};
+  const mapped: ReadonlyArray<WorkersAiToolDef> = tools.map((tool) => ({
     type: "function",
     function: {
       name: tool.name,
@@ -307,9 +296,7 @@ const prepareTools = (
   if (toolChoice === "auto" || toolChoice == null) {
     return { tools: mapped, tool_choice: "auto" };
   }
-  if (toolChoice === "none") {
-    return { tools: mapped, tool_choice: "none" };
-  }
+  if (toolChoice === "none") return { tools: mapped, tool_choice: "none" };
   if (toolChoice === "required") {
     return { tools: mapped, tool_choice: "required" };
   }
@@ -351,7 +338,13 @@ const toRequestBody = ({
     messages,
     ...(tools !== undefined ? { tools } : {}),
     ...(tool_choice !== undefined ? { tool_choice } : {}),
-    ...(stream ? { stream: true } : {}),
+    // `stream_options.include_usage` is the OpenAI-compatible opt-in for
+    // usage tokens to appear in the final streamed chunk. Without it most
+    // Workers AI models omit `usage` from the stream entirely, leaving the
+    // `finish` part with zeroed counts.
+    ...(stream
+      ? { stream: true, stream_options: { include_usage: true } }
+      : {}),
     ...(parameters?.maxTokens !== undefined
       ? { max_tokens: parameters.maxTokens }
       : {}),
@@ -396,165 +389,171 @@ const mapFinishReason = (raw: unknown): Response.FinishReason => {
   }
 };
 
-const mapUsage = (
-  raw: Record<string, unknown> | undefined,
-): typeof Response.Usage.Encoded => {
+const mapUsage = (raw: Record<string, unknown> | undefined): Response.Usage => {
   const usage = (raw?.usage as Record<string, unknown> | undefined) ?? {};
   const promptTokens = (usage.prompt_tokens as number | undefined) ?? 0;
   const completionTokens = (usage.completion_tokens as number | undefined) ?? 0;
   const cached = (
     usage.prompt_tokens_details as { cached_tokens?: number } | undefined
   )?.cached_tokens;
-  return {
+  // Construct an actual `Response.Usage` instance — `Schema.Class<Usage>`
+  // encodes by going through the class constructor / `isInstance` check, so a
+  // plain struct that "matches" the encoded shape isn't enough.
+  return new Response.Usage({
     inputTokens: {
       uncached:
-        cached !== undefined ? Math.max(0, promptTokens - cached) : undefined,
+        cached !== undefined
+          ? Math.max(0, promptTokens - cached)
+          : promptTokens,
       total: promptTokens,
-      cacheRead: cached,
-      cacheWrite: undefined,
+      cacheRead: cached ?? 0,
+      cacheWrite: 0,
     },
     outputTokens: {
       total: completionTokens,
-      text: undefined,
-      reasoning: undefined,
+      text: 0,
+      reasoning: 0,
     },
+  });
+};
+
+// ---------------------------------------------------------------------------
+// generateText: JSON → Response.PartEncoded[]
+//
+// Normalize the dual-shape (native + OpenAI) response into a single
+// `DecodedResponse` once, then build the part list with pure spreads.
+// ---------------------------------------------------------------------------
+
+interface DecodedToolCall {
+  readonly rawId: string;
+  readonly name: string;
+  readonly arguments: unknown;
+}
+
+interface DecodedResponse {
+  readonly text: string | undefined;
+  readonly reasoning: string | undefined;
+  readonly toolCalls: ReadonlyArray<DecodedToolCall>;
+  readonly finishReason: string | undefined;
+}
+
+const decodeResponse = (raw: Record<string, unknown>): DecodedResponse => {
+  const choice = (
+    raw.choices as
+      | Array<{
+          message?: {
+            content?: string | null;
+            reasoning_content?: string;
+            reasoning?: string;
+            tool_calls?: ReadonlyArray<Record<string, unknown>>;
+          };
+          finish_reason?: string;
+        }>
+      | undefined
+  )?.[0];
+  const message = choice?.message;
+
+  const openAiText = message?.content;
+  const text =
+    typeof openAiText === "string" && openAiText.length > 0
+      ? openAiText
+      : nativeTextOf(raw.response);
+  const reasoning = message?.reasoning_content ?? message?.reasoning;
+  const rawToolCalls =
+    message?.tool_calls ??
+    (Array.isArray(raw.tool_calls)
+      ? (raw.tool_calls as ReadonlyArray<Record<string, unknown>>)
+      : []);
+
+  return {
+    text,
+    reasoning: reasoning && reasoning.length > 0 ? reasoning : undefined,
+    toolCalls: rawToolCalls.flatMap(decodeToolCall),
+    finishReason:
+      choice?.finish_reason ?? (raw.finish_reason as string | undefined),
   };
 };
 
-// ---------------------------------------------------------------------------
-// generateText: JSON response → Response.PartEncoded[]
-// ---------------------------------------------------------------------------
-
-const extractText = (output: Record<string, unknown>): string | undefined => {
-  const choices = output.choices as
-    | Array<{ message?: { content?: string | null } }>
-    | undefined;
-  const choiceContent = choices?.[0]?.message?.content;
-  if (choiceContent != null && String(choiceContent).length > 0) {
-    return String(choiceContent);
-  }
-  if ("response" in output) {
-    const r = output.response;
-    if (r == null) return undefined;
-    if (typeof r === "object") return JSON.stringify(r);
-    return String(r);
-  }
-  return undefined;
+const nativeTextOf = (raw: unknown): string | undefined => {
+  if (raw == null) return undefined;
+  if (typeof raw === "object") return JSON.stringify(raw);
+  const text = String(raw);
+  return text.length > 0 ? text : undefined;
 };
 
-const extractReasoning = (
-  output: Record<string, unknown>,
-): string | undefined => {
-  const choices = output.choices as
-    | Array<{ message?: { reasoning_content?: string; reasoning?: string } }>
-    | undefined;
-  const r =
-    choices?.[0]?.message?.reasoning_content ??
-    choices?.[0]?.message?.reasoning;
-  return r && r.length > 0 ? r : undefined;
-};
-
-const extractToolCalls = (
-  output: Record<string, unknown>,
-): Array<{ id: string; name: string; arguments: unknown }> => {
-  const collect = (
-    raw: ReadonlyArray<Record<string, unknown>>,
-  ): Array<{ id: string; name: string; arguments: unknown }> =>
-    raw.flatMap((tc) => {
-      const fn = tc.function as
-        | { name?: string; arguments?: unknown }
-        | undefined;
-      const id = (tc.id as string | undefined) ?? "";
-      if (fn?.name) {
-        return [{ id, name: fn.name, arguments: fn.arguments ?? "" }];
-      }
-      const flatName = tc.name as string | undefined;
-      if (flatName) {
-        return [{ id, name: flatName, arguments: tc.arguments ?? "" }];
-      }
-      return [];
-    });
-
-  if (Array.isArray(output.tool_calls)) {
-    return collect(output.tool_calls as ReadonlyArray<Record<string, unknown>>);
+const decodeToolCall = (
+  tc: Record<string, unknown>,
+): ReadonlyArray<DecodedToolCall> => {
+  const fn = tc.function as { name?: string; arguments?: unknown } | undefined;
+  const rawId = (tc.id as string | undefined) ?? "";
+  if (fn?.name) {
+    return [{ rawId, name: fn.name, arguments: fn.arguments ?? "" }];
   }
-  const choices = output.choices as
-    | Array<{
-        message?: { tool_calls?: ReadonlyArray<Record<string, unknown>> };
-      }>
-    | undefined;
-  const fromChoice = choices?.[0]?.message?.tool_calls;
-  if (Array.isArray(fromChoice)) {
-    return collect(fromChoice);
+  const flatName = tc.name as string | undefined;
+  if (flatName) {
+    return [{ rawId, name: flatName, arguments: tc.arguments ?? "" }];
   }
   return [];
+};
+
+const tryParseJsonArgs = (raw: unknown): unknown => {
+  if (typeof raw !== "string") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Leave as raw string; the framework's tool-result decoder will fail loudly.
+    return raw;
+  }
 };
 
 const parseGenerateText = Effect.fnUntraced(function* (
   raw: Record<string, unknown>,
 ) {
-  const idGenerator = yield* IdGenerator.IdGenerator;
-  const parts: Array<Response.PartEncoded> = [];
+  const idGen = yield* IdGenerator.IdGenerator;
+  const decoded = decodeResponse(raw);
 
-  const reasoning = extractReasoning(raw);
-  if (reasoning !== undefined) {
-    parts.push({
-      type: "reasoning",
-      text: reasoning,
-    });
-  }
-
-  const text = extractText(raw);
-  if (text !== undefined && text.length > 0) {
-    parts.push({ type: "text", text });
-  }
-
-  const toolCalls = extractToolCalls(raw);
-  for (const tc of toolCalls) {
-    const id = tc.id || (yield* idGenerator.generateId());
-    let params: unknown = tc.arguments;
-    if (typeof params === "string") {
-      try {
-        params = JSON.parse(params);
-      } catch {
-        // leave as raw string; framework's tool-result decoder will fail loudly
-      }
-    }
-    parts.push({
-      type: "tool-call",
-      id,
-      name: tc.name,
-      params,
-    });
-  }
-
-  const finishReason = mapFinishReason(
-    extractFinishReason(raw) ?? (toolCalls.length > 0 ? "tool_calls" : "stop"),
+  const toolCallParts = yield* Effect.forEach(decoded.toolCalls, (tc) =>
+    Effect.gen(function* () {
+      const id = tc.rawId || (yield* idGen.generateId());
+      return {
+        type: "tool-call" as const,
+        id,
+        name: tc.name,
+        params: tryParseJsonArgs(tc.arguments),
+      };
+    }),
   );
 
-  parts.push({
-    type: "finish",
-    reason: finishReason,
-    usage: mapUsage(raw),
-    response: undefined,
-  });
+  const finish = mapFinishReason(
+    decoded.finishReason ??
+      (decoded.toolCalls.length > 0 ? "tool_calls" : "stop"),
+  );
 
-  return parts;
+  return [
+    ...(decoded.reasoning !== undefined
+      ? [{ type: "reasoning" as const, text: decoded.reasoning }]
+      : []),
+    ...(decoded.text !== undefined && decoded.text.length > 0
+      ? [{ type: "text" as const, text: decoded.text }]
+      : []),
+    ...toolCallParts,
+    {
+      type: "finish" as const,
+      reason: finish,
+      usage: mapUsage(raw),
+      response: undefined,
+    },
+  ] satisfies ReadonlyArray<Response.PartEncoded>;
 });
-
-const extractFinishReason = (
-  output: Record<string, unknown>,
-): string | undefined => {
-  const choices = output.choices as
-    | Array<{ finish_reason?: string }>
-    | undefined;
-  return (
-    choices?.[0]?.finish_reason ?? (output.finish_reason as string | undefined)
-  );
-};
 
 // ---------------------------------------------------------------------------
 // streamText: SSE byte stream → Stream<Response.StreamPartEncoded>
+//
+// Immutable `StreamState` is threaded through `Stream.mapAccumEffect`. The
+// per-chunk output buffer (`parts: Array<StreamPartEncoded>`) is mutable for
+// performance — it's scoped to one chunk, never escapes the handler, and lets
+// us avoid the O(n²) array-spread that pure threading would force in the hot
+// path. This matches the pattern Effect's own `@effect/ai-*` adapters use.
 // ---------------------------------------------------------------------------
 
 interface StreamState {
@@ -584,6 +583,19 @@ const initialStreamState = (): StreamState => ({
   receivedDone: false,
 });
 
+type StreamParts = Array<Response.StreamPartEncoded>;
+
+const tryParseJson = (data: string): Record<string, unknown> | undefined => {
+  try {
+    const v = JSON.parse(data);
+    return v && typeof v === "object"
+      ? (v as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 const isNullFinalizationToolCall = (tc: Record<string, unknown>): boolean => {
   const fn = tc.function as Record<string, unknown> | undefined;
   const name = fn?.name ?? tc.name ?? null;
@@ -592,240 +604,270 @@ const isNullFinalizationToolCall = (tc: Record<string, unknown>): boolean => {
   return !id && !name && (!args || args === "");
 };
 
+const closeReasoning = (
+  state: StreamState,
+  parts: StreamParts,
+): StreamState => {
+  if (state.reasoningId === undefined) return state;
+  parts.push({ type: "reasoning-end", id: state.reasoningId });
+  return { ...state, reasoningId: undefined };
+};
+
 const closeToolCall = (
   state: StreamState,
   index: number,
-  out: Array<Response.StreamPartEncoded>,
+  parts: StreamParts,
 ): StreamState => {
   if (state.closedToolIndices.has(index)) return state;
   const tc = state.toolCalls.get(index);
   if (!tc) return state;
-  out.push({ type: "tool-params-end", id: tc.id });
-  // Mark as closed; framework re-assembles `tool-call` from accumulated deltas.
+  parts.push({ type: "tool-params-end", id: tc.id });
   const closed = new Set(state.closedToolIndices);
   closed.add(index);
   return { ...state, closedToolIndices: closed };
 };
 
-const handleToolCallChunks = (
+const emitTextDelta = (
   state: StreamState,
-  chunks: ReadonlyArray<Record<string, unknown>>,
-  idGenerator: IdGenerator.Service,
-  out: Array<Response.StreamPartEncoded>,
+  delta: string,
+  parts: StreamParts,
+  idGen: IdGenerator.Service,
 ): Effect.Effect<StreamState> =>
   Effect.gen(function* () {
-    let cur = state;
-    for (const tc of chunks) {
-      if (isNullFinalizationToolCall(tc)) {
-        if (cur.lastToolIndex !== undefined) {
-          cur = closeToolCall(cur, cur.lastToolIndex, out);
+    let s = closeReasoning(state, parts);
+    if (s.textId === undefined) {
+      const id = yield* idGen.generateId();
+      parts.push({ type: "text-start", id });
+      s = { ...s, textId: id };
+    }
+    parts.push({ type: "text-delta", id: s.textId!, delta });
+    return s;
+  });
+
+const emitReasoningDelta = (
+  state: StreamState,
+  delta: string,
+  parts: StreamParts,
+  idGen: IdGenerator.Service,
+): Effect.Effect<StreamState> =>
+  Effect.gen(function* () {
+    let s = state;
+    if (s.reasoningId === undefined) {
+      const id = yield* idGen.generateId();
+      parts.push({ type: "reasoning-start", id });
+      s = { ...s, reasoningId: id };
+    }
+    parts.push({ type: "reasoning-delta", id: s.reasoningId!, delta });
+    return s;
+  });
+
+const handleToolDeltas = (
+  state: StreamState,
+  deltas: ReadonlyArray<Record<string, unknown>>,
+  parts: StreamParts,
+  idGen: IdGenerator.Service,
+): Effect.Effect<StreamState> =>
+  Effect.gen(function* () {
+    let s = state;
+    for (const d of deltas) {
+      if (isNullFinalizationToolCall(d)) {
+        if (s.lastToolIndex !== undefined) {
+          s = closeToolCall(s, s.lastToolIndex, parts);
         }
         continue;
       }
-      const tcIndex = (tc.index as number | undefined) ?? 0;
-      const fn = tc.function as
+      const idx = (d.index as number | undefined) ?? 0;
+      const fn = d.function as
         | { name?: string; arguments?: string }
         | undefined;
-      const tcName = fn?.name ?? (tc.name as string | undefined) ?? "";
-      const tcArgs =
-        fn?.arguments ?? (tc.arguments as string | undefined) ?? "";
-      const tcIdRaw = (tc.id as string | undefined) ?? "";
+      const name = fn?.name ?? (d.name as string | undefined) ?? "";
+      const args = fn?.arguments ?? (d.arguments as string | undefined) ?? "";
+      const rawId = (d.id as string | undefined) ?? "";
 
-      let entry = cur.toolCalls.get(tcIndex);
-      if (entry === undefined) {
-        // Close the previous active call before starting a new one.
-        if (cur.lastToolIndex !== undefined && cur.lastToolIndex !== tcIndex) {
-          cur = closeToolCall(cur, cur.lastToolIndex, out);
+      const existing = s.toolCalls.get(idx);
+      if (existing === undefined) {
+        if (s.lastToolIndex !== undefined && s.lastToolIndex !== idx) {
+          s = closeToolCall(s, s.lastToolIndex, parts);
         }
-        const id = tcIdRaw || (yield* idGenerator.generateId());
-        entry = { id, name: tcName };
-        const next = new Map(cur.toolCalls);
-        next.set(tcIndex, entry);
-        cur = { ...cur, toolCalls: next, lastToolIndex: tcIndex };
-        out.push({
-          type: "tool-params-start",
-          id: entry.id,
-          name: entry.name,
-        });
-        if (tcArgs.length > 0) {
-          out.push({
-            type: "tool-params-delta",
-            id: entry.id,
-            delta: tcArgs,
-          });
+        const id = rawId || (yield* idGen.generateId());
+        const entry = { id, name };
+        const next = new Map(s.toolCalls);
+        next.set(idx, entry);
+        s = { ...s, toolCalls: next, lastToolIndex: idx };
+        parts.push({ type: "tool-params-start", id, name });
+        if (args.length > 0) {
+          parts.push({ type: "tool-params-delta", id, delta: args });
         }
       } else {
-        cur = { ...cur, lastToolIndex: tcIndex };
-        if (tcArgs.length > 0) {
-          out.push({
+        s = { ...s, lastToolIndex: idx };
+        if (args.length > 0) {
+          parts.push({
             type: "tool-params-delta",
-            id: entry.id,
-            delta: tcArgs,
+            id: existing.id,
+            delta: args,
           });
         }
       }
     }
-    return cur;
+    return s;
   });
+
+const hasNonZeroUsage = (raw: unknown): boolean => {
+  if (raw == null || typeof raw !== "object") return false;
+  const u = raw as Record<string, unknown>;
+  const prompt = (u.prompt_tokens as number | undefined) ?? 0;
+  const completion = (u.completion_tokens as number | undefined) ?? 0;
+  const total = (u.total_tokens as number | undefined) ?? 0;
+  return prompt > 0 || completion > 0 || total > 0;
+};
+
+const updateChunkMeta = (
+  state: StreamState,
+  chunk: Record<string, unknown>,
+): StreamState => {
+  let s = state;
+  // Workers AI's native stream emits the real usage chunk, then a
+  // "zero-valued terminator" chunk where every count is 0 (it also re-emits
+  // `usage` with all zeros). Treat the zero chunk as a no-op so we keep the
+  // meaningful counts.
+  if (chunk.usage !== undefined && hasNonZeroUsage(chunk.usage)) {
+    s = { ...s, usage: chunk };
+  }
+  const choices = chunk.choices as
+    | Array<{ finish_reason?: string }>
+    | undefined;
+  const finish =
+    choices?.[0]?.finish_reason ?? (chunk.finish_reason as string | undefined);
+  if (finish != null) s = { ...s, finishReason: finish };
+  return s;
+};
+
+const handleNativeText = (
+  state: StreamState,
+  chunk: Record<string, unknown>,
+  parts: StreamParts,
+  idGen: IdGenerator.Service,
+): Effect.Effect<StreamState> => {
+  const native = chunk.response;
+  if (native == null || native === "") return Effect.succeed(state);
+  const text =
+    typeof native === "object" ? JSON.stringify(native) : String(native);
+  if (text.length === 0) return Effect.succeed(state);
+  return emitTextDelta(state, text, parts, idGen);
+};
+
+const handleNativeToolCalls = (
+  state: StreamState,
+  chunk: Record<string, unknown>,
+  parts: StreamParts,
+  idGen: IdGenerator.Service,
+): Effect.Effect<StreamState> => {
+  if (!Array.isArray(chunk.tool_calls)) return Effect.succeed(state);
+  return Effect.gen(function* () {
+    const s = closeReasoning(state, parts);
+    return yield* handleToolDeltas(
+      s,
+      chunk.tool_calls as ReadonlyArray<Record<string, unknown>>,
+      parts,
+      idGen,
+    );
+  });
+};
+
+const handleOpenAiDelta = (
+  state: StreamState,
+  chunk: Record<string, unknown>,
+  parts: StreamParts,
+  idGen: IdGenerator.Service,
+): Effect.Effect<StreamState> => {
+  const delta = (
+    chunk.choices as Array<{ delta?: Record<string, unknown> }> | undefined
+  )?.[0]?.delta;
+  if (!delta) return Effect.succeed(state);
+  return Effect.gen(function* () {
+    let s = state;
+    const reasoning = (delta.reasoning_content ?? delta.reasoning) as
+      | string
+      | undefined;
+    if (reasoning && reasoning.length > 0) {
+      s = yield* emitReasoningDelta(s, reasoning, parts, idGen);
+    }
+    const text = delta.content as string | undefined;
+    if (text && text.length > 0) {
+      s = yield* emitTextDelta(s, text, parts, idGen);
+    }
+    const toolDeltas = delta.tool_calls as
+      | ReadonlyArray<Record<string, unknown>>
+      | undefined;
+    if (Array.isArray(toolDeltas)) {
+      s = closeReasoning(s, parts);
+      s = yield* handleToolDeltas(s, toolDeltas, parts, idGen);
+    }
+    return s;
+  });
+};
 
 const handleStreamChunk = (
   state: StreamState,
   data: string,
-  idGenerator: IdGenerator.Service,
+  idGen: IdGenerator.Service,
 ): Effect.Effect<
   readonly [StreamState, ReadonlyArray<Response.StreamPartEncoded>]
 > =>
   Effect.gen(function* () {
-    const out: Array<Response.StreamPartEncoded> = [];
-
-    if (data === "" || data === "[DONE]") {
-      return [
-        data === "[DONE]" ? { ...state, receivedDone: true } : state,
-        out,
-      ] as const;
+    if (data === "") return [state, []] as const;
+    if (data === "[DONE]") {
+      return [{ ...state, receivedDone: true }, []] as const;
     }
+    const chunk = tryParseJson(data);
+    if (chunk === undefined) return [state, []] as const;
 
-    let chunk: Record<string, unknown>;
-    try {
-      chunk = JSON.parse(data) as Record<string, unknown>;
-    } catch {
-      return [state, out] as const;
-    }
-
-    let cur: StreamState = { ...state, receivedAnyData: true };
-    if (chunk.usage !== undefined) {
-      cur = { ...cur, usage: chunk as Record<string, unknown> };
-    }
-
-    const choices = chunk.choices as
-      | Array<{ finish_reason?: string; delta?: Record<string, unknown> }>
-      | undefined;
-    const choiceFinish = choices?.[0]?.finish_reason;
-    const directFinish = chunk.finish_reason as string | undefined;
-    if (choiceFinish != null) cur = { ...cur, finishReason: choiceFinish };
-    else if (directFinish != null) cur = { ...cur, finishReason: directFinish };
-
-    // Native: top-level `response`
-    const nativeResponse = chunk.response;
-    if (
-      nativeResponse !== undefined &&
-      nativeResponse !== null &&
-      nativeResponse !== ""
-    ) {
-      const text = String(nativeResponse);
-      if (text.length > 0) {
-        if (cur.reasoningId !== undefined) {
-          out.push({ type: "reasoning-end", id: cur.reasoningId });
-          cur = { ...cur, reasoningId: undefined };
-        }
-        if (cur.textId === undefined) {
-          const id = yield* idGenerator.generateId();
-          cur = { ...cur, textId: id };
-          out.push({ type: "text-start", id });
-        }
-        out.push({ type: "text-delta", id: cur.textId!, delta: text });
-      }
-    }
-
-    // Native: top-level `tool_calls`
-    if (Array.isArray(chunk.tool_calls)) {
-      if (cur.reasoningId !== undefined) {
-        out.push({ type: "reasoning-end", id: cur.reasoningId });
-        cur = { ...cur, reasoningId: undefined };
-      }
-      cur = yield* handleToolCallChunks(
-        cur,
-        chunk.tool_calls as ReadonlyArray<Record<string, unknown>>,
-        idGenerator,
-        out,
-      );
-    }
-
-    // OpenAI: choices[0].delta
-    const delta = choices?.[0]?.delta;
-    if (delta) {
-      const reasoningDelta = (delta.reasoning_content ?? delta.reasoning) as
-        | string
-        | undefined;
-      if (reasoningDelta && reasoningDelta.length > 0) {
-        if (cur.reasoningId === undefined) {
-          const id = yield* idGenerator.generateId();
-          cur = { ...cur, reasoningId: id };
-          out.push({ type: "reasoning-start", id });
-        }
-        out.push({
-          type: "reasoning-delta",
-          id: cur.reasoningId!,
-          delta: reasoningDelta,
-        });
-      }
-
-      const textDelta = delta.content as string | undefined;
-      if (textDelta && textDelta.length > 0) {
-        if (cur.reasoningId !== undefined) {
-          out.push({ type: "reasoning-end", id: cur.reasoningId });
-          cur = { ...cur, reasoningId: undefined };
-        }
-        if (cur.textId === undefined) {
-          const id = yield* idGenerator.generateId();
-          cur = { ...cur, textId: id };
-          out.push({ type: "text-start", id });
-        }
-        out.push({ type: "text-delta", id: cur.textId!, delta: textDelta });
-      }
-
-      const deltaToolCalls = delta.tool_calls as
-        | ReadonlyArray<Record<string, unknown>>
-        | undefined;
-      if (Array.isArray(deltaToolCalls)) {
-        if (cur.reasoningId !== undefined) {
-          out.push({ type: "reasoning-end", id: cur.reasoningId });
-          cur = { ...cur, reasoningId: undefined };
-        }
-        cur = yield* handleToolCallChunks(
-          cur,
-          deltaToolCalls,
-          idGenerator,
-          out,
-        );
-      }
-    }
-
-    return [cur, out] as const;
+    const parts: StreamParts = [];
+    let s: StreamState = { ...state, receivedAnyData: true };
+    s = updateChunkMeta(s, chunk);
+    s = yield* handleNativeText(s, chunk, parts, idGen);
+    s = yield* handleNativeToolCalls(s, chunk, parts, idGen);
+    s = yield* handleOpenAiDelta(s, chunk, parts, idGen);
+    return [s, parts] as const;
   });
 
 const finalizeStream = (
   state: StreamState,
 ): ReadonlyArray<Response.StreamPartEncoded> => {
-  const out: Array<Response.StreamPartEncoded> = [];
-  let cur = state;
-  for (const [idx] of cur.toolCalls) {
-    cur = closeToolCall(cur, idx, out);
-  }
-  if (cur.reasoningId !== undefined) {
-    out.push({ type: "reasoning-end", id: cur.reasoningId });
-  }
-  if (cur.textId !== undefined) {
-    out.push({ type: "text-end", id: cur.textId });
-  }
+  const parts: StreamParts = [];
+  let s = state;
+  for (const [idx] of s.toolCalls) s = closeToolCall(s, idx, parts);
+  s = closeReasoning(s, parts);
+  if (s.textId !== undefined) parts.push({ type: "text-end", id: s.textId });
 
+  // Three cases for the final reason:
+  //  1. The model emitted an explicit `finish_reason`           → map it.
+  //  2. The stream ended cleanly (`[DONE]` seen) but no reason  → "stop".
+  //     Workers AI's native shape never includes `finish_reason`,
+  //     so without this rule every native-mode stream would report
+  //     `unknown` despite completing successfully.
+  //  3. The stream ended abnormally (no `[DONE]`, no reason)    → "error".
   const reason: Response.FinishReason =
-    !cur.receivedDone && cur.receivedAnyData && cur.finishReason === undefined
-      ? "error"
-      : mapFinishReason(cur.finishReason);
+    s.finishReason !== undefined
+      ? mapFinishReason(s.finishReason)
+      : s.receivedDone
+        ? "stop"
+        : s.receivedAnyData
+          ? "error"
+          : "unknown";
 
-  out.push({
+  parts.push({
     type: "finish",
     reason,
-    usage: mapUsage(cur.usage),
+    usage: mapUsage(s.usage),
     response: undefined,
   });
-  return out;
+  return parts;
 };
 
 const parseStreamText = (
   resp: Response,
-  idGenerator: IdGenerator.Service,
+  idGen: IdGenerator.Service,
 ): Stream.Stream<Response.StreamPartEncoded, AiError.AiError> => {
   const body = resp.body;
   if (body === null) {
@@ -842,14 +884,14 @@ const parseStreamText = (
     Stream.catchTag("Retry", (retry) => Stream.die(retry)),
     Stream.mapAccumEffect(
       initialStreamState,
-      (state, event) => handleStreamChunk(state, event.data, idGenerator),
+      (state, event) => handleStreamChunk(state, event.data, idGen),
       { onHalt: (state) => finalizeStream(state) },
     ),
   );
 };
 
 // ---------------------------------------------------------------------------
-// make / layer
+// Error mapping
 // ---------------------------------------------------------------------------
 
 const toAiError = (

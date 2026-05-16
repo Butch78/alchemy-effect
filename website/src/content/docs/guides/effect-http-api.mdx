@@ -67,12 +67,13 @@ server *and* a typed client.
 import * as Schema from "effect/Schema";
 import * as HttpApi from "effect/unstable/httpapi/HttpApi";
 import * as HttpApiEndpoint from "effect/unstable/httpapi/HttpApiEndpoint";
+import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
 import * as HttpApiGroup from "effect/unstable/httpapi/HttpApiGroup";
 import { Task, TaskNotFound } from "./task.ts";
 
 const getTask = HttpApiEndpoint.get("getTask", "/:id", {
   success: Task,
-  error: TaskNotFound,
+  error: Schema.Union(TaskNotFound, HttpApiError.InternalServerError),
 });
 
 const createTask = HttpApiEndpoint.post("createTask", "/", {
@@ -80,6 +81,7 @@ const createTask = HttpApiEndpoint.post("createTask", "/", {
   payload: Schema.Struct({
     title: Schema.String,
   }),
+  error: HttpApiError.InternalServerError,
 });
 
 export class TasksGroup extends HttpApiGroup.make("Tasks")
@@ -92,6 +94,12 @@ export class TaskApi extends HttpApi.make("TaskApi").add(TasksGroup) {}
 Nothing executes yet — `TaskApi` is purely a value-level description.
 The same `TaskApi` constant is what we'll hand to the client at the
 end of this guide.
+
+`HttpApiError.InternalServerError` is Effect's built-in 500 error.
+Declaring it on every endpoint reserves a typed slot for "something
+went wrong on the server" — much better than the alternative
+(`Effect.orDie` everywhere, which drops the cause into a generic
+500 with no logging). We'll wire handlers to it in step 3b.
 
 ## 3. Build the Worker
 
@@ -161,11 +169,28 @@ safe to call inside Init.
 > incoming request. Init only does construction; the work happens
 > later, on each `fetch` call.
 
+First, define a single helper that converts any unexpected failure
+into the typed `InternalServerError` we just declared, logging the
+underlying cause on the way out:
+
 ```typescript twoslash
 // @noErrors
   Effect.gen(function* () {
     const tasks = yield* Cloudflare.R2Bucket.bind(Tasks);
 
++   const toInternalError = (cause: unknown) =>
++     Effect.logError("Worker handler failed", cause).pipe(
++       Effect.andThen(Effect.fail(new HttpApiError.InternalServerError())),
++     );
+```
+
+Now build the handlers. Each one ends in `Effect.catch(toInternalError)`
+so any unexpected error is logged and turned into a 500 — while typed
+errors like `TaskNotFound` stay in the error channel and reach the
+client unchanged:
+
+```typescript twoslash
+// @noErrors
 +   const tasksGroup = HttpApiBuilder.group(TaskApi, "Tasks", (handlers) =>
 +     handlers
 +       .handle("getTask", ({ path }) =>
@@ -175,7 +200,7 @@ safe to call inside Init.
 +             return yield* Effect.fail(new TaskNotFound({ id: path.id }));
 +           }
 +           return Schema.decodeUnknownSync(Task)(JSON.parse(yield* object.text()));
-+         }).pipe(Effect.orDie),
++         }).pipe(Effect.catch(toInternalError)),
 +       )
 +       .handle("createTask", ({ payload }) =>
 +         Effect.gen(function* () {
@@ -186,7 +211,7 @@ safe to call inside Init.
 +           });
 +           yield* tasks.put(task.id, JSON.stringify(task));
 +           return task;
-+         }).pipe(Effect.orDie),
++         }).pipe(Effect.catch(toInternalError)),
 +       ),
 +   );
 
@@ -196,13 +221,17 @@ safe to call inside Init.
 
 Each handler receives a typed request. `path.id` is a `string`
 because that's what the endpoint declared, and the return type must
-satisfy `Task` (or fail with `TaskNotFound`). Mismatches are caught
-at compile time.
+satisfy `Task` (or fail with `TaskNotFound | InternalServerError`).
+Mismatches are caught at compile time.
 
-`tasks.get` and `tasks.put` can fail with `R2Error`, which isn't in
-either endpoint's declared error set. `Effect.orDie` converts those
-into defects so the HttpApi runtime turns them into 500 responses —
-keeping the typed error channel reserved for `TaskNotFound`.
+:::tip Prefer `Effect.catch(toInternalError)` over `Effect.orDie`
+`Effect.orDie` converts failures into defects, which the HttpApi
+runtime turns into a 500 — but the cause vanishes into the void
+unless you've wired up a separate logger. `Effect.catch` keeps the
+failure on the error channel: you log it once on the way out and
+fail with a typed `InternalServerError` that the client can
+discriminate against just like `TaskNotFound`.
+:::
 
 ### 3c. Return `{ fetch }`
 
@@ -245,6 +274,7 @@ import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
+import * as HttpApiError from "effect/unstable/httpapi/HttpApiError";
 import { TaskApi } from "./api.ts";
 import { Tasks } from "./bucket.ts";
 import { Task, TaskNotFound } from "./task.ts";
@@ -254,6 +284,11 @@ export default Cloudflare.Worker(
   { main: import.meta.path },
   Effect.gen(function* () {
     const tasks = yield* Cloudflare.R2Bucket.bind(Tasks);
+
+    const toInternalError = (cause: unknown) =>
+      Effect.logError("Worker handler failed", cause).pipe(
+        Effect.andThen(Effect.fail(new HttpApiError.InternalServerError())),
+      );
 
     const tasksGroup = HttpApiBuilder.group(TaskApi, "Tasks", (handlers) =>
       handlers
@@ -266,7 +301,7 @@ export default Cloudflare.Worker(
             return Schema.decodeUnknownSync(Task)(
               JSON.parse(yield* object.text()),
             );
-          }).pipe(Effect.orDie),
+          }).pipe(Effect.catch(toInternalError)),
         )
         .handle("createTask", ({ payload }) =>
           Effect.gen(function* () {
@@ -277,7 +312,7 @@ export default Cloudflare.Worker(
             });
             yield* tasks.put(task.id, JSON.stringify(task));
             return task;
-          }).pipe(Effect.orDie),
+          }).pipe(Effect.catch(toInternalError)),
         ),
     );
 
@@ -370,18 +405,28 @@ Get the URL from the deploy output and run it:
 TASK_API_URL=https://your-worker.workers.dev bun scripts/client.ts
 ```
 
-`client.Tasks.getTask` returns `Effect<Task, TaskNotFound | HttpClientError>`.
-The `TaskNotFound` branch is a real typed value you can pattern-match
-on, not an HTTP status code you have to interpret.
+`client.Tasks.getTask` returns
+`Effect<Task, TaskNotFound | InternalServerError | HttpClientError>`.
+Each branch is a real typed value you can pattern-match on with
+`Effect.catchTag` — not an HTTP status code you have to interpret.
+`InternalServerError` is exactly what you'd otherwise have to
+guess from a bare `500`.
 
 ## Recap
 
 - The **schema** (`Task`, `TaskNotFound`) and the **API spec**
   (`TaskApi`) live outside the Worker — they're pure descriptions.
+- Every endpoint declares
+  `error: HttpApiError.InternalServerError` (or a union with it),
+  so unexpected failures have a typed home — never `Effect.orDie`.
 - The **handlers** are constructed inside the Worker's Init phase
   closure. We build a `Layer` with `HttpApiBuilder.group` but never
   `yield*` the running server — that only makes sense per-request.
+  Each handler ends in `Effect.catch(toInternalError)` so unexpected
+  errors are logged and wrapped in `InternalServerError`.
 - The Worker's surface is `{ fetch }`, where `fetch` is an
   `HttpEffect` produced by `HttpRouter.toHttpEffect`.
 - The same `TaskApi` value drives a fully typed client via
-  `HttpApiClient.make` — no codegen, no string URLs.
+  `HttpApiClient.make` — no codegen, no string URLs. Errors come
+  back as discriminated typed values, including
+  `InternalServerError` for the server-side 500 case.
