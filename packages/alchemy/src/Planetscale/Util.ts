@@ -3,15 +3,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
-
-/**
- * Subset of {@link ScopedPlanStatusSession} used by the polling helpers.
- * Typed structurally so callers can pass the full session without
- * pulling the CLI types into this provider module.
- */
-export interface Noter {
-  note: (message: string) => Effect.Effect<void>;
-}
+import type { ScopedPlanStatusSession } from "../Cli/Cli.ts";
 
 export const DEFAULT_MIGRATIONS_TABLE = "__alchemy_migrations";
 
@@ -81,7 +73,7 @@ export const waitForBranchReady = Effect.fn(function* (
   organization: string,
   database: string,
   branch: string,
-  session?: Noter,
+  session?: ScopedPlanStatusSession,
 ) {
   const attempts = yield* Ref.make(0);
   return yield* pollUntil(
@@ -118,7 +110,7 @@ export const waitForBranchReady = Effect.fn(function* (
 export const waitForDatabaseReady = Effect.fn(function* (
   organization: string,
   database: string,
-  session?: Noter,
+  session?: ScopedPlanStatusSession,
 ) {
   const attempts = yield* Ref.make(0);
   return yield* pollUntil(
