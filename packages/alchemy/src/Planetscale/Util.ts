@@ -91,8 +91,8 @@ export const waitForBranchReady = Effect.fn(function* (
         const n = yield* Ref.updateAndGet(attempts, (i) => i + 1);
         yield* session.note(
           n === 1
-            ? `Waiting for branch "${branch}" to be ready...`
-            : `Waiting for branch "${branch}" to be ready... (${n})`,
+            ? "Waiting for branch to be ready..."
+            : `Waiting for branch to be ready... (${n})`,
         );
       }
       return yield* ops.getBranch({ organization, database, branch });
@@ -128,8 +128,8 @@ export const waitForDatabaseReady = Effect.fn(function* (
         const n = yield* Ref.updateAndGet(attempts, (i) => i + 1);
         yield* session.note(
           n === 1
-            ? `Waiting for database "${database}" to be ready...`
-            : `Waiting for database "${database}" to be ready... (${n})`,
+            ? "Waiting for database to be ready..."
+            : `Waiting for database to be ready... (${n})`,
         );
       }
       return yield* ops.getDatabase({ organization, database });

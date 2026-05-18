@@ -334,7 +334,7 @@ export const makeBranchProvider = <R extends ResourceLike>(opts: {
                   })
                 : news.clusterSize
               : undefined;
-            yield* session.note(`Creating branch "${desiredBranchName}"...`);
+            yield* session.note("Creating branch...");
             current = yield* createBranch({
               organization,
               database: databaseName,

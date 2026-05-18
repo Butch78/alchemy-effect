@@ -258,7 +258,7 @@ export const PostgresDatabaseProvider = () =>
 
           // Ensure — if missing, create.
           if (!observed) {
-            yield* session.note(`Creating database "${newName}"...`);
+            yield* session.note("Creating database...");
             observed = yield* createDb({
               organization,
               name: newName,
