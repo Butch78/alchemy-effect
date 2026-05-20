@@ -2,6 +2,8 @@ export * from "./BucketEventSource.ts";
 export * from "./EventBridgeEventSource.ts";
 export * from "./EventSourceMapping.ts";
 export * from "./Function.ts";
+export * from "./FunctionBridge.ts";
+export * from "./FunctionRuntimeContext.ts";
 export * from "./HttpServer.ts";
 export * from "./InvokeFunction.ts";
 export * from "./Permission.ts";

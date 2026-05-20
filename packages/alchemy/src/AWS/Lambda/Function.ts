@@ -5,12 +5,10 @@ import type { CreateFunctionRequest } from "@distilled.cloud/aws/lambda";
 import * as Lambda from "@distilled.cloud/aws/lambda";
 import { Region } from "@distilled.cloud/aws/Region";
 import type * as lambda from "aws-lambda";
-import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
-import * as Redacted from "effect/Redacted";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import type * as rolldown from "rolldown";
@@ -18,15 +16,11 @@ import { Unowned } from "../../AdoptPolicy.ts";
 import * as Bundle from "../../Bundle/Bundle.ts";
 import * as TempRoot from "../../Bundle/TempRoot.ts";
 import { isResolved } from "../../Diff.ts";
-import type { HttpEffect } from "../../Http.ts";
-import * as Output from "../../Output.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import { Platform, type Main, type PlatformProps } from "../../Platform.ts";
 import type { LogLine, LogsInput } from "../../Provider.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource, type ResourceBinding } from "../../Resource.ts";
-import { Self } from "../../Self.ts";
-import * as Serverless from "../../Serverless/index.ts";
 import { Stack } from "../../Stack.ts";
 import {
   createInternalTags,
@@ -41,7 +35,10 @@ import { AWSEnvironment } from "../Environment.ts";
 import * as IAM from "../IAM/index.ts";
 import type { PolicyStatement } from "../IAM/Policy.ts";
 import type { Providers } from "../Providers.ts";
-import { makeFunctionHttpHandler } from "./HttpServer.ts";
+import {
+  makeFunctionRuntimeContext,
+  type FunctionRuntimeContext,
+} from "./FunctionRuntimeContext.ts";
 
 export const FunctionTypeId = "AWS.Lambda.Function" as const;
 export type FunctionTypeId = typeof FunctionTypeId;
@@ -356,103 +353,9 @@ export const Function: Platform<
   Function,
   FunctionServices,
   FunctionShape,
-  Serverless.FunctionContext
+  FunctionRuntimeContext
 > = Platform(FunctionTypeId, {
-  createRuntimeContext: (id: string): Serverless.FunctionContext => {
-    const listeners: Effect.Effect<Serverless.FunctionListener>[] = [];
-    const env: Record<string, any> = {};
-
-    const ctx = {
-      Type: FunctionTypeId,
-      id,
-      env,
-      set: (id: string, output: Output.Output) =>
-        Effect.sync(() => {
-          const key = id.replaceAll(/[^a-zA-Z0-9]/g, "_");
-          // Preserve `Redacted`-ness across the Output → Lambda env var
-          // round-trip. `JSON.stringify(Redacted)` would emit the literal
-          // string `"<redacted>"` and lose the value, so secrets are
-          // serialized with a `{_tag: "Redacted", value: ...}` marker
-          // that the runtime `get` path detects and rebuilds.
-          env[key] = output.pipe(
-            Output.map((value) =>
-              Redacted.isRedacted(value)
-                ? JSON.stringify({
-                    _tag: "Redacted",
-                    value: Redacted.value(value),
-                  })
-                : JSON.stringify(value),
-            ),
-          );
-          return key;
-        }),
-      get: <T>(key: string) =>
-        Config.string(key).pipe(
-          Effect.flatMap((val) =>
-            Effect.try({
-              try: () => {
-                const value = JSON.parse(val);
-                if (
-                  value !== null &&
-                  typeof value === "object" &&
-                  (value as { _tag?: unknown })._tag === "Redacted" &&
-                  "value" in (value as object)
-                ) {
-                  return Redacted.make(
-                    (value as { value: unknown }).value,
-                  ) as unknown as T;
-                }
-                return value as T;
-              },
-              catch: () => val, // assume it's just a string
-            }),
-          ),
-          Effect.catch((cause) =>
-            Effect.die(
-              new Error(`Failed to get environment variable: ${key}`, {
-                cause,
-              }),
-            ),
-          ),
-        ),
-      serve: (handler: HttpEffect) =>
-        ctx.listen(makeFunctionHttpHandler(handler)),
-      listen: ((
-        handler:
-          | Serverless.FunctionListener
-          | Effect.Effect<Serverless.FunctionListener>,
-      ) =>
-        Effect.sync(() =>
-          Effect.isEffect(handler)
-            ? listeners.push(handler)
-            : listeners.push(Effect.succeed(handler)),
-        )) as any as Serverless.FunctionContext["listen"],
-      exports: Effect.sync(() => ({
-        // construct an Effect that produces the Function's entrypoint
-        // Effect<(event, context) => Promise<any>>
-        handler: Effect.map(
-          Effect.all(listeners, {
-            concurrency: "unbounded",
-          }),
-          (handlers) =>
-            async (event: any, context: lambda.Context): Promise<any> => {
-              for (const handler of handlers) {
-                const eff = handler(event);
-                if (Effect.isEffect(eff)) {
-                  return await eff.pipe(
-                    Effect.provideService(HandlerContext, context),
-                    Effect.tap(Effect.logDebug),
-                    Effect.runPromise,
-                  );
-                }
-              }
-              throw new Error("No event handler found");
-            },
-        ),
-      })),
-    };
-    return ctx;
-  },
+  createRuntimeContext: (id) => makeFunctionRuntimeContext(id),
 });
 
 export const FunctionProvider = () =>
@@ -623,7 +526,6 @@ export const FunctionProvider = () =>
         id: string,
         props: FunctionProps,
       ) {
-        const handler = props.handler ?? "default";
         const sourcemap = props.build?.output?.sourcemap ?? true;
         const uploadSourceMap = props.uploadSourceMap ?? true;
 
@@ -665,74 +567,17 @@ export const FunctionProvider = () =>
               realMain,
               virtualEntryPlugin(
                 (importPath) => `
-import { layer as nodeServicesLayer } from "@effect/platform-node/NodeServices";
-import { Stack } from "alchemy/Stack";
-import { makeEntrypointLayer } from "alchemy/Runtime";
-import * as Config from "effect/Config";
-import * as ConfigProvider from "effect/ConfigProvider";
-import * as Credentials from "@distilled.cloud/aws/Credentials";
-import * as Effect from "effect/Effect";
-import { layer as fetchHttpClientLayer } from "effect/unstable/http/FetchHttpClient";
-import * as Layer from "effect/Layer";
-import * as Logger from "effect/Logger";
-import * as Region from "@distilled.cloud/aws/Region";
-import * as Context from "effect/Context";
-import { MinimumLogLevel } from "effect/References";
+import { makeFunctionBridge } from "alchemy/AWS/Lambda";
 
 import entrypoint from ${JSON.stringify(importPath)};
 
-const tag = Context.Service("${Self.key}")
-const layer = makeEntrypointLayer(tag, entrypoint);
-
-const platform = Layer.mergeAll(
-  nodeServicesLayer,
-  fetchHttpClientLayer,
-  // TODO(sam): wire this up to telemetry more directly
-  Logger.layer([Logger.consolePretty()]),
-);
-
-const stack = Layer.effect(
-  Stack,
-  Effect.all([
-    Config.string("ALCHEMY_STACK_NAME"),
-    Config.string("ALCHEMY_STAGE")
-  ]).pipe(
-    Effect.map(([name, stage]) => ({
-      name,
-      stage,
-      bindings: {},
-      resources: {}
-    }))
-  )
-);
-
-const handlerEffect = tag.pipe(
-  Effect.flatMap(func => func.RuntimeContext.exports),
-  Effect.flatMap(exports => exports.handler),
-  Effect.provide(
-    layer.pipe(
-      Layer.provideMerge(stack),
-      Layer.provideMerge(Credentials.fromEnv()),
-      Layer.provideMerge(Region.fromEnv()),
-      Layer.provideMerge(platform),
-      Layer.provideMerge(
-        Layer.succeed(
-          ConfigProvider.ConfigProvider,
-          ConfigProvider.fromEnv()
-        )
-      ),
-      Layer.provideMerge(
-        Layer.succeed(
-          MinimumLogLevel,
-          process.env.DEBUG ? "Debug" : "Info",
-        )
-      ),
-    )
-  ),
-  Effect.scoped
-);
-
-export default await Effect.runPromise(handlerEffect)
+export default makeFunctionBridge({
+  entrypoint,
+  stack: {
+    name: ${JSON.stringify(stack.name)},
+    stage: ${JSON.stringify(stack.stage)},
+  },
+});
 `,
               ),
             );
