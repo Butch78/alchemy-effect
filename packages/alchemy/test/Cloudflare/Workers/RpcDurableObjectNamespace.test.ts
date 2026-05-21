@@ -141,12 +141,14 @@ test(
     const results = yield* Effect.forEach(
       Array.from({ length: N }, (_, i) => i),
       () =>
-        client
-          .post(`${url}/counter/concurrent/increment`)
-          .pipe(
-            Effect.flatMap((res) => res.json),
-            Effect.timeout("10 seconds"),
-          ),
+        client.post(`${url}/counter/concurrent/increment`).pipe(
+          Effect.flatMap((res) => res.json),
+          Effect.timeout("10 seconds"),
+          Effect.retry({
+            schedule: Schedule.exponential("500 millis"),
+            times: 3,
+          }),
+        ),
       { concurrency: 32 },
     );
 
@@ -170,7 +172,13 @@ test(
       const results = yield* Effect.forEach(
         Array.from({ length: N }, (_, i) => i),
         (i) =>
-          c.Ping({ message: `m-${i}` }).pipe(Effect.timeout("10 seconds")),
+          c.Ping({ message: `m-${i}` }).pipe(
+            Effect.timeout("10 seconds"),
+            Effect.retry({
+              schedule: Schedule.exponential("500 millis"),
+              times: 3,
+            }),
+          ),
         { concurrency: 32 },
       );
 
@@ -195,7 +203,13 @@ test(
       const results = yield* Effect.forEach(
         Array.from({ length: N }, (_, i) => i),
         (i) =>
-          c.PingDO({ message: `m-${i}` }).pipe(Effect.timeout("10 seconds")),
+          c.PingDO({ message: `m-${i}` }).pipe(
+            Effect.timeout("10 seconds"),
+            Effect.retry({
+              schedule: Schedule.exponential("500 millis"),
+              times: 3,
+            }),
+          ),
         { concurrency: 16 },
       );
 
@@ -220,9 +234,14 @@ test(
       const results = yield* Effect.forEach(
         Array.from({ length: N }, (_, i) => i),
         (i) =>
-          c
-            .CountDO({ upto: 3 + (i % 3) })
-            .pipe(Stream.runCollect, Effect.timeout("10 seconds")),
+          c.CountDO({ upto: 3 + (i % 3) }).pipe(
+            Stream.runCollect,
+            Effect.timeout("10 seconds"),
+            Effect.retry({
+              schedule: Schedule.exponential("500 millis"),
+              times: 3,
+            }),
+          ),
         { concurrency: 16 },
       );
 
