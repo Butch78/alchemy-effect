@@ -146,8 +146,7 @@ under the hood):
 `Cloudflare.Hyperdrive.bind(...)` resolves the runtime accessor for
 the binding — `connectionString`, `host`, `port`, `user`,
 `password`, `database`, plus a `raw` escape hatch. Yield it once at
-init and add the `nodejs_compat` flag so the underlying Postgres
-driver can run inside a Worker:
+init:
 
 ```diff lang="typescript"
 // src/Api.ts
@@ -158,14 +157,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
 export default class Api extends Cloudflare.Worker<Api>()(
   "Api",
-  {
-    main: import.meta.path,
-+    compatibility: {
-+      // @effect/sql-pg uses pg under the hood,
-+      // which needs Node's `net` and `crypto` APIs.
-+      flags: ["nodejs_compat"],
-+    },
-  },
+  { main: import.meta.path },
   Effect.gen(function* () {
 +    const hd = yield* Cloudflare.Hyperdrive.bind(Hyperdrive);
 

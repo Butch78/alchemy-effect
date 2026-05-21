@@ -164,13 +164,7 @@ import { Users } from "./schema.ts";
 
 export default class Api extends Cloudflare.Worker<Api>()(
   "Api",
-  {
-    main: import.meta.path,
-    compatibility: {
-      // node-postgres needs Node.js APIs to run inside a Worker.
-      flags: ["nodejs_compat"],
-    },
-  },
+  { main: import.meta.path },
   Effect.gen(function* () {
     const hd = yield* Cloudflare.Hyperdrive.bind(Hyperdrive);
     const db = yield* Drizzle.postgres(hd.connectionString);
@@ -193,8 +187,6 @@ A few things to call out:
 - The pool is created exactly once per Worker isolate. Subsequent
   requests reuse the same pool — there's no per-request connection
   setup.
-- `nodejs_compat` is required because `pg` (node-postgres) powers the
-  underlying transport.
 
 ## Deploy
 
