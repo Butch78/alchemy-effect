@@ -14,9 +14,7 @@ import {
   type LanguageModelOptions,
 } from "./LanguageModel.ts";
 
-/**
- * Error raised by AI Gateway runtime operations.
- */
+// Error raised by AI Gateway runtime operations.
 export class AiGatewayError extends Data.TaggedError("AiGatewayError")<{
   /**
    * Human-readable runtime error message.
@@ -83,14 +81,20 @@ export interface AiGatewayClient {
 }
 
 /**
- * Binding service that turns an {@link AiGatewayResource} resource into a typed
- * {@link AiGatewayClient} for Worker runtime code.
+ * Binding service that turns an {@link AiGatewayResource} resource
+ * into a typed {@link AiGatewayClient} for Worker runtime code. Wraps
+ * the Cloudflare AI Gateway runtime binding so each operation returns
+ * an Effect tagged with {@link AiGatewayError}, exposes the raw
+ * Workers AI handle for `ai.run(...)`, and provides a `model(options)`
+ * factory that produces an `effect/unstable/ai` `LanguageModel`
+ * `Layer`.
+ *
+ * @binding
  *
  * @section Calling AI Gateway
- * Bind the gateway during the Worker's init phase, then use `run` or `getUrl`
- * from request handlers.
- *
  * @example Run through a gateway
+ * Bind the gateway during the Worker's init phase, then use `run` or
+ * `getUrl` from request handlers.
  * ```typescript
  * const aiGateway = yield* Cloudflare.AiGatewayBinding.bind(gateway);
  *
@@ -106,8 +110,29 @@ export interface AiGatewayClient {
  * };
  * ```
  *
- * Provide {@link AiGatewayBindingLive} in the worker's runtime layer to
- * resolve the underlying Cloudflare AI binding at request time.
+ * @section Driving Effect AI through the gateway
+ * @example `aiGateway.model(...)` -> Effect AI `LanguageModel`
+ * `model(options)` produces a `Layer<LanguageModel, never,
+ * RuntimeContext>` that translates `LanguageModel.generateText` /
+ * `streamText` calls (including tool calls and structured outputs)
+ * into `ai.run(...)` against the bound Workers AI model, routed
+ * through the gateway.
+ * ```typescript
+ * const aiGateway = yield* Cloudflare.AiGatewayBinding.bind(gateway);
+ *
+ * const languageModel = aiGateway.model({
+ *   client: aiGateway,
+ *   model: "@cf/meta/llama-3.1-8b-instruct",
+ *   parameters: { temperature: 0.7, maxTokens: 1024 },
+ * });
+ *
+ * const response = yield* AiLanguageModel.generateText({ prompt }).pipe(
+ *   Effect.provide(languageModel),
+ * );
+ * ```
+ *
+ * Provide {@link AiGatewayBindingLive} in the worker's runtime layer
+ * to resolve the underlying Cloudflare AI binding at request time.
  */
 export class AiGatewayBinding extends Binding.Service<
   AiGatewayBinding,
