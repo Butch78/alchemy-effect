@@ -41,7 +41,7 @@ test(
   "RpcDurableObjectNamespace: Increment / Get round-trip via Worker",
   Effect.gen(function* () {
     const { url } = yield* stack;
-    const client = yield* HttpClient.HttpClient;
+    const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient);
 
     const incRes = yield* client.post(`${url}/counter/alpha/increment`).pipe(
       Effect.retry({
@@ -68,7 +68,7 @@ test(
   "RpcDurableObjectNamespace: separate getByName(id) instances are isolated",
   Effect.gen(function* () {
     const { url } = yield* stack;
-    const client = yield* HttpClient.HttpClient;
+    const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient);
 
     yield* client
       .post(`${url}/counter/beta/increment`)
@@ -90,7 +90,7 @@ test(
   "RpcDurableObjectNamespace: streaming RPC via getByName(id).CountUpTo",
   Effect.gen(function* () {
     const { url } = yield* stack;
-    const client = yield* HttpClient.HttpClient;
+    const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient);
 
     const res = yield* client
       .get(`${url}/counter/delta/stream?upto=4`)
@@ -128,7 +128,7 @@ test(
   "RpcDurableObjectNamespace: 100 concurrent Increment calls do not hang",
   Effect.gen(function* () {
     const { url } = yield* stack;
-    const client = yield* HttpClient.HttpClient;
+    const client = HttpClient.filterStatusOk(yield* HttpClient.HttpClient);
 
     yield* client.post(`${url}/counter/concurrent/increment`).pipe(
       Effect.retry({
