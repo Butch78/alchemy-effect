@@ -54,12 +54,10 @@ adds a `Planetscale` step that either reads `PLANETSCALE_API_TOKEN_ID`,
 environment (good for CI) or stores the credentials under
 `~/.alchemy/credentials/<profile>/planetscale-stored.json`.
 
-## Provision the database
+## Create the cluster
 
-Create `src/Db.ts`. `Planetscale.MySQLDatabase` is the long-lived
-cluster, `MySQLBranch` is a branch off of it (cheap to fork for
-previews), and `MySQLPassword` materializes a user + password we
-can feed to Hyperdrive:
+Create `src/Db.ts` with a `Planetscale.MySQLDatabase` — the
+long-lived cluster:
 
 ```typescript
 // src/Db.ts
@@ -73,24 +71,63 @@ export const Db = Effect.gen(function* () {
     allowForeignKeyConstraints: true,
   });
 
-  const branch = yield* Planetscale.MySQLBranch("app-branch", {
-    database,
-    isProduction: false,
-  });
-
-  const password = yield* Planetscale.MySQLPassword("app-password", {
-    database,
-    branch,
-    role: "readwriter",
-  });
-
-  return { database, branch, password };
+  return { database };
 });
 ```
 
-The password's `origin` (host / port / database / user / password)
-is what Hyperdrive consumes — it's materialized lazily so the
-actual secret never lands in plan output.
+`clusterSize` picks the underlying hardware tier; `region.slug`
+pins where the data sits. `allowForeignKeyConstraints: true`
+enables FK enforcement, which Vitess gates behind an explicit
+opt-in.
+
+## Fork a branch
+
+```diff lang="typescript"
+  export const Db = Effect.gen(function* () {
+    const database = yield* Planetscale.MySQLDatabase("app-db", {
+      region: { slug: "us-east" },
+      clusterSize: "PS_10",
+      allowForeignKeyConstraints: true,
+    });
+
++   const branch = yield* Planetscale.MySQLBranch("app-branch", {
++     database,
++     isProduction: false,
++   });
+
+-   return { database };
++   return { database, branch };
+  });
+```
+
+`MySQLBranch` forks the cluster — cheap to spin up per preview
+environment. `isProduction: false` flags this one as
+non-production so it skips production safeguards (single-writer
+locks, schema-change gates).
+
+## Materialize a password for Hyperdrive
+
+```diff lang="typescript"
+    const branch = yield* Planetscale.MySQLBranch("app-branch", {
+      database,
+      isProduction: false,
+    });
+
++   const password = yield* Planetscale.MySQLPassword("app-password", {
++     database,
++     branch,
++     role: "readwriter",
++   });
+
+-   return { database, branch };
++   return { database, branch, password };
+  });
+```
+
+`MySQLPassword` materializes a user + password we can feed to
+Hyperdrive. The password's `origin` (host / port / database / user
+/ password) is materialized lazily so the actual secret never
+lands in plan output.
 
 ## Put Hyperdrive in front
 

@@ -55,10 +55,10 @@ this change adds a `Neon` step that either reads `NEON_API_KEY`
 from the environment (good for CI) or stores a key under
 `~/.alchemy/credentials/<profile>/neon-stored.json`.
 
-## Provision the database
+## Create the project
 
-Create `src/Db.ts`. A `Neon.Project` is the top-level container —
-it owns a default branch, a default role, and the WAL history that
+Create `src/Db.ts` with a `Neon.Project` — the top-level container.
+It owns a default branch, a default role, and the WAL history that
 copy-on-write branches fork from:
 
 ```typescript
@@ -71,12 +71,28 @@ export const Db = Effect.gen(function* () {
     region: "aws-us-east-1",
   });
 
-  const branch = yield* Neon.Branch("app-branch", {
-    project,
-  });
-
-  return { project, branch };
+  return { project };
 });
+```
+
+`region` pins the underlying AWS region — same one your Worker
+fans out from, ideally, to keep Hyperdrive's origin hop short.
+
+## Fork a branch
+
+```diff lang="typescript"
+  export const Db = Effect.gen(function* () {
+    const project = yield* Neon.Project("app-db", {
+      region: "aws-us-east-1",
+    });
+
++   const branch = yield* Neon.Branch("app-branch", {
++     project,
++   });
+
+-   return { project };
++   return { project, branch };
+  });
 ```
 
 `Neon.Branch` is a copy-on-write fork — cheap to create, fast to
