@@ -10,7 +10,7 @@ import { MinimumLogLevel } from "effect/References";
 import * as Schedule from "effect/Schedule";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import { Bucket } from "./fixtures/bucket.ts";
-import { Search } from "./fixtures/search.ts";
+import { Search, Token } from "./fixtures/search.ts";
 import AiSearchTestWorker from "./fixtures/worker.ts";
 
 const { test, beforeAll, afterAll, deploy, destroy } = Test.make({
@@ -22,9 +22,7 @@ const logLevel = Effect.provideService(
   process.env.DEBUG ? "Debug" : "Info",
 );
 
-const tokenId = process.env.AI_SEARCH_TOKEN_ID;
-
-test.provider.skipIf(!tokenId)(
+test.provider(
   "create, update, delete ai search instance",
   (stack) =>
     Effect.gen(function* () {
@@ -35,9 +33,12 @@ test.provider.skipIf(!tokenId)(
       const search = yield* stack.deploy(
         Effect.gen(function* () {
           const bucket = yield* Bucket;
+          const token = yield* Cloudflare.AiSearchToken("CrudToken", {
+            name: "alchemy-test-ai-search-crud-token",
+          });
           return yield* Cloudflare.AiSearch("Search", {
             name: "alchemy-test-ai-search-crud",
-            tokenId: tokenId!,
+            tokenId: token.tokenId,
             source: { type: "r2", bucketName: bucket.bucketName },
             chunkSize: 256,
             maxNumResults: 10,
@@ -57,9 +58,12 @@ test.provider.skipIf(!tokenId)(
       const updated = yield* stack.deploy(
         Effect.gen(function* () {
           const bucket = yield* Bucket;
+          const token = yield* Cloudflare.AiSearchToken("CrudToken", {
+            name: "alchemy-test-ai-search-crud-token",
+          });
           return yield* Cloudflare.AiSearch("Search", {
             name: "alchemy-test-ai-search-crud",
-            tokenId: tokenId!,
+            tokenId: token.tokenId,
             source: { type: "r2", bucketName: bucket.bucketName },
             chunkSize: 384,
             maxNumResults: 25,
@@ -100,6 +104,7 @@ const Stack = Alchemy.Stack(
     state: Cloudflare.state(),
   },
   Effect.gen(function* () {
+    yield* Token;
     const search = yield* Search;
     const worker = yield* AiSearchTestWorker;
     return {
@@ -112,7 +117,7 @@ const Stack = Alchemy.Stack(
 const stack = beforeAll(deploy(Stack));
 afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack));
 
-test.skipIf(!tokenId)(
+test(
   "deployed worker can call AiSearch binding (info)",
   Effect.gen(function* () {
     const out = yield* stack;
