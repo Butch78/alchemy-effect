@@ -139,155 +139,7 @@ export interface RpcWorkerClass extends Effect.Effect<
   >;
 }
 
-/**
- * `RpcWorker` is a thin sugar over {@link Worker} for the common case
- * where a worker's entire `fetch` surface is a typed Effect `RpcGroup`.
- * It takes the rpc `schema` directly in props alongside `main`, and
- * accepts an init Effect that returns the already-piped
- * `RpcServer.toHttpEffect(...)`-producing Effect (no `{ fetch }`
- * wrapper) — the wrapper plugs it into the worker's `fetch` for you.
- *
- * Functionally identical to writing `Cloudflare.Worker(...)` with
- * `return { fetch: RpcServer.toHttpEffect(schema).pipe(...) }`; use
- * whichever style you prefer.
- *
- * The class form (`class X extends Cloudflare.RpcWorker<X>()(...)`)
- * carries `Self` through the result type as `Rpc<Self>`, so other
- * workers binding to this one see the rpc shape pinned to `Self`.
- *
- * @resource
- *
- * @section Defining the rpc group
- * @example Pure schema description
- * The rpc group and its schemas live outside any worker so both the
- * server (`RpcWorker`) and any consumers (`RpcClient.make` /
- * `RpcDurableObjectNamespace`) import the same value.
- * ```typescript
- * import * as Schema from "effect/Schema";
- * import { Rpc, RpcGroup } from "effect/unstable/rpc";
- *
- * export class TaskNotFound extends Schema.TaggedClass<TaskNotFound>()(
- *   "TaskNotFound",
- *   { id: Schema.String },
- * ) {}
- *
- * const getTask = Rpc.make("getTask", {
- *   payload: { id: Schema.String },
- *   success: Schema.String,
- *   error: TaskNotFound,
- * });
- *
- * export class TaskRpcs extends RpcGroup.make(getTask) {}
- * ```
- *
- * @section Implementing the worker
- * @example Class form (recommended)
- * Mirrors `Cloudflare.Worker<Self>()(...)` — `class X extends ...`
- * works the same. The init Effect builds a handlers `Layer` from the
- * group and returns the `RpcServer.toHttpEffect(schema)`-piped Effect
- * directly.
- * ```typescript
- * import * as Cloudflare from "alchemy/Cloudflare";
- * import * as Effect from "effect/Effect";
- * import * as Layer from "effect/Layer";
- * import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
- * import { TaskRpcs } from "./rpcs.ts";
- *
- * export default class Worker extends Cloudflare.RpcWorker<Worker>()(
- *   "Worker",
- *   { main: import.meta.filename, schema: TaskRpcs },
- *   Effect.gen(function* () {
- *     const handlers = TaskRpcs.toLayer({
- *       getTask: ({ id }) => Effect.succeed(`task-${id}`),
- *     });
- *     return RpcServer.toHttpEffect(TaskRpcs).pipe(
- *       Effect.provide(Layer.mergeAll(handlers, RpcSerialization.layerJson)),
- *     );
- *   }),
- * ) {}
- * ```
- *
- * @example NDJSON for streaming rpcs
- * If any rpc in the group is a streaming rpc, the wire serialization
- * must be `RpcSerialization.layerNdjson` — streaming rpcs need
- * newline framing on the wire.
- * ```typescript
- * return RpcServer.toHttpEffect(ChatRpcs).pipe(
- *   Effect.provide(handlers),
- *   Effect.provide(RpcSerialization.layerNdjson),
- * );
- * ```
- *
- * @section Binding it from another worker
- * @example `Cloudflare.RpcWorker.bind(WorkerClass)`
- * Inside another worker's init, `RpcWorker.bind(WorkerClass)`
- * registers the service binding on the surrounding worker and returns
- * an `Effect<RpcClient>` factory. Each per-request handler yields the
- * factory to build a fresh client (Cloudflare rejects cross-request
- * reuse of the underlying stub I/O).
- * ```typescript
- * import TaskWorker from "./task-worker.ts";
- *
- * export default class Caller extends Cloudflare.RpcWorker<Caller>()(
- *   "Caller",
- *   { main: import.meta.filename, schema: CallerRpcs },
- *   Effect.gen(function* () {
- *     // INIT: register binding once
- *     const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
- *
- *     const handlers = CallerRpcs.toLayer({
- *       // PER-REQUEST: fresh client per call
- *       proxyGetTask: ({ id }) =>
- *         Effect.gen(function* () {
- *           const tasks = yield* makeTasks;
- *           return yield* tasks.getTask({ id });
- *         }),
- *     });
- *     return RpcServer.toHttpEffect(CallerRpcs).pipe(
- *       Effect.provide(Layer.mergeAll(handlers, RpcSerialization.layerJson)),
- *     );
- *   }),
- * ) {}
- * ```
- *
- * @section Calling it from a script
- * @example Typed rpc client (outside a worker)
- * The same `RpcGroup` value drives a fully typed client for scripts
- * too. Errors arrive as the schema-typed values declared in
- * `Rpc.make` — match on them with `Effect.catchTag`.
- * ```typescript
- * import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
- * import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
- * import { TaskRpcs } from "./rpcs.ts";
- *
- * const program = Effect.gen(function* () {
- *   const client = yield* RpcClient.make(TaskRpcs);
- *   return yield* client.getTask({ id: "abc" });
- * });
- *
- * Effect.runPromise(
- *   program.pipe(
- *     Effect.provide(
- *       Layer.mergeAll(
- *         RpcClient.layerProtocolHttp({ url: process.env.URL! }),
- *         RpcSerialization.layerJson,
- *         FetchHttpClient.layer,
- *       ),
- *     ),
- *   ),
- * );
- * ```
- *
- * @section Yielding the surrounding worker from inside the impl
- * @example `yield* RpcWorker` inside the init effect
- * Mirrors `yield* DurableObjectNamespace` — yield the tag to access
- * the surrounding worker.
- * ```typescript
- * Effect.gen(function* () {
- *   const self = yield* Cloudflare.RpcWorker;
- * });
- * ```
- */
+/** @internal helper — exposed as `RpcWorker.bind` below. */
 const bind = <Self, Rpcs extends Rpc.Any>(
   workerEff: RpcWorkerYieldable<Self, Rpcs>,
 ): Effect.Effect<
@@ -370,6 +222,174 @@ const bind = <Self, Rpcs extends Rpc.Any>(
     return factory;
   });
 
+/**
+ * `RpcWorker` is a thin sugar over {@link Worker} for the common case
+ * where a worker's entire `fetch` surface is a typed Effect `RpcGroup`.
+ * It takes the rpc `schema` directly in props alongside `main`, and
+ * accepts an init Effect that returns the already-piped
+ * `RpcServer.toHttpEffect(...)`-producing Effect (no `{ fetch }`
+ * wrapper) — the wrapper plugs it into the worker's `fetch` for you.
+ *
+ * Functionally identical to writing `Cloudflare.Worker(...)` with
+ * `return { fetch: RpcServer.toHttpEffect(schema).pipe(...) }`; use
+ * whichever style you prefer.
+ *
+ * The class form (`class X extends Cloudflare.RpcWorker<X>()(...)`)
+ * carries `Self` through the result type as `Rpc<Self>`, so other
+ * workers binding to this one see the rpc shape pinned to `Self`.
+ *
+ * @resource
+ *
+ * @section Defining the rpc group
+ * @example Pure schema description
+ * The rpc group and its schemas live outside any worker so both the
+ * server (`RpcWorker`) and any consumers (`RpcClient.make` /
+ * `RpcDurableObjectNamespace`) import the same value.
+ * ```typescript
+ * import * as Schema from "effect/Schema";
+ * import { Rpc, RpcGroup } from "effect/unstable/rpc";
+ *
+ * export class TaskNotFound extends Schema.TaggedClass<TaskNotFound>()(
+ *   "TaskNotFound",
+ *   { id: Schema.String },
+ * ) {}
+ *
+ * const getTask = Rpc.make("getTask", {
+ *   payload: { id: Schema.String },
+ *   success: Schema.String,
+ *   error: TaskNotFound,
+ * });
+ *
+ * export class TaskRpcs extends RpcGroup.make(getTask) {}
+ * ```
+ *
+ * @section Implementing the worker
+ * @example Class form (recommended)
+ * Mirrors `Cloudflare.Worker<Self>()(...)` — `class X extends ...`
+ * works the same. The init Effect builds a handlers `Layer` from the
+ * group and returns the `RpcServer.toHttpEffect(schema)`-piped Effect
+ * directly.
+ * ```typescript
+ * import * as Cloudflare from "alchemy/Cloudflare";
+ * import * as Effect from "effect/Effect";
+ * import * as Layer from "effect/Layer";
+ * import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
+ * import { TaskRpcs } from "./rpcs.ts";
+ *
+ * export default class Worker extends Cloudflare.RpcWorker<Worker>()(
+ *   "Worker",
+ *   { main: import.meta.filename, schema: TaskRpcs },
+ *   Effect.gen(function* () {
+ *     const handlers = TaskRpcs.toLayer({
+ *       getTask: ({ id }) => Effect.succeed(`task-${id}`),
+ *     });
+ *     return RpcServer.toHttpEffect(TaskRpcs).pipe(
+ *       Effect.provide(Layer.mergeAll(handlers, RpcSerialization.layerJson)),
+ *     );
+ *   }),
+ * ) {}
+ * ```
+ *
+ * @example NDJSON for streaming rpcs
+ * If any rpc in the group is a streaming rpc, the wire serialization
+ * must be `RpcSerialization.layerNdjson` — streaming rpcs need
+ * newline framing on the wire.
+ * ```typescript
+ * return RpcServer.toHttpEffect(ChatRpcs).pipe(
+ *   Effect.provide(handlers),
+ *   Effect.provide(RpcSerialization.layerNdjson),
+ * );
+ * ```
+ *
+ * @section Binding it from another worker
+ * @example `Cloudflare.RpcWorker.bind(WorkerClass)`
+ * Inside another worker's init, `RpcWorker.bind(WorkerClass)` runs at
+ * **init**, registers the service binding on the surrounding worker,
+ * and returns an `Effect<RpcClient>` *factory*. Each per-request
+ * handler yields the factory to build a fresh client (Cloudflare
+ * rejects cross-request reuse of the underlying stub I/O).
+ * ```typescript
+ * import TaskWorker from "./task-worker.ts";
+ *
+ * export default class Caller extends Cloudflare.RpcWorker<Caller>()(
+ *   "Caller",
+ *   { main: import.meta.filename, schema: CallerRpcs },
+ *   Effect.gen(function* () {
+ *     // INIT: register binding once
+ *     const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
+ *
+ *     const handlers = CallerRpcs.toLayer({
+ *       // PER-REQUEST: fresh client per call
+ *       proxyGetTask: ({ id }) =>
+ *         Effect.gen(function* () {
+ *           const tasks = yield* makeTasks;
+ *           return yield* tasks.getTask({ id });
+ *         }),
+ *     });
+ *     return RpcServer.toHttpEffect(CallerRpcs).pipe(
+ *       Effect.provide(Layer.mergeAll(handlers, RpcSerialization.layerJson)),
+ *     );
+ *   }),
+ * ) {}
+ * ```
+ *
+ * @section Driving it from a test
+ * @example `Test.make` + `RpcClient.make`
+ * The same `RpcGroup` drives a typed client. `Test.make` deploys the
+ * stack once for the file; each test yields the deploy handle for its
+ * URL and calls procedures directly.
+ * ```typescript
+ * import { expect } from "@effect/vitest";
+ * import * as Cloudflare from "alchemy/Cloudflare";
+ * import * as Test from "alchemy/Test/Vitest";
+ * import * as Effect from "effect/Effect";
+ * import * as Layer from "effect/Layer";
+ * import * as Schedule from "effect/Schedule";
+ * import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
+ * import * as RpcClient from "effect/unstable/rpc/RpcClient";
+ * import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
+ * import Stack from "../alchemy.run.ts";
+ * import { TaskRpcs } from "../src/rpcs.ts";
+ *
+ * const { test, beforeAll, afterAll, deploy, destroy } = Test.make({
+ *   providers: Cloudflare.providers(),
+ * });
+ * const stack = beforeAll(deploy(Stack));
+ * afterAll.skipIf(!!process.env.NO_DESTROY)(destroy(Stack));
+ *
+ * const layer = (url: string) =>
+ *   RpcClient.layerProtocolHttp({ url }).pipe(
+ *     Layer.provide(FetchHttpClient.layer),
+ *     Layer.provide(
+ *       Layer.succeed(RpcSerialization.RpcSerialization, RpcSerialization.json),
+ *     ),
+ *   );
+ *
+ * test(
+ *   "getTask",
+ *   Effect.gen(function* () {
+ *     const { url } = yield* stack;
+ *     yield* Effect.gen(function* () {
+ *       const client = yield* RpcClient.make(TaskRpcs);
+ *       const result = yield* client
+ *         .getTask({ id: "abc" })
+ *         .pipe(Effect.retry({ schedule: Schedule.exponential("500 millis"), times: 5 }));
+ *       expect(result).toBe("task-abc");
+ *     }).pipe(Effect.scoped, Effect.provide(layer(url)));
+ *   }),
+ * );
+ * ```
+ *
+ * @section Yielding the surrounding worker from inside the impl
+ * @example `yield* RpcWorker` inside the init effect
+ * Mirrors `yield* DurableObjectNamespace` — yield the tag to access
+ * the surrounding worker.
+ * ```typescript
+ * Effect.gen(function* () {
+ *   const self = yield* Cloudflare.RpcWorker;
+ * });
+ * ```
+ */
 export const RpcWorker: RpcWorkerClass = (() => {
   const fn = (...args: any[]) => {
     // Class-form: zero args returns the `(name, props, impl) =>` builder.
