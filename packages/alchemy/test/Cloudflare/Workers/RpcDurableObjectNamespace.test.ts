@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { MinimumLogLevel } from "effect/References";
 import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
@@ -118,6 +119,119 @@ test(
         .PingDO({ message: "via DO" })
         .pipe(Effect.retry({ times: 5 }));
       expect(pingDO.echo).toBe("via DO");
+    }).pipe(Effect.scoped, Effect.provide(rpcClientLayer(url)));
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "RpcDurableObjectNamespace: 100 concurrent Increment calls do not hang",
+  Effect.gen(function* () {
+    const { url } = yield* stack;
+    const client = yield* HttpClient.HttpClient;
+
+    yield* client.post(`${url}/counter/concurrent/increment`).pipe(
+      Effect.retry({
+        schedule: Schedule.exponential("500 millis"),
+        times: 10,
+      }),
+    );
+
+    const N = 100;
+    const results = yield* Effect.forEach(
+      Array.from({ length: N }, (_, i) => i),
+      () =>
+        client
+          .post(`${url}/counter/concurrent/increment`)
+          .pipe(
+            Effect.flatMap((res) => res.json),
+            Effect.timeout("10 seconds"),
+          ),
+      { concurrency: 32 },
+    );
+
+    expect(results).toHaveLength(N);
+    const finalRes = yield* client.get(`${url}/counter/concurrent`);
+    const final = (yield* finalRes.json) as { count: number };
+    expect(final.count).toBe(N + 1);
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "RpcWorker + RpcDurableObjectNamespace: 100 concurrent unary RPCs do not hang",
+  Effect.gen(function* () {
+    const { url } = yield* rpcWorkerStack;
+
+    yield* Effect.gen(function* () {
+      const c = yield* RpcClient.make(RpcWorkerWorkerRpcs);
+
+      const N = 100;
+      const results = yield* Effect.forEach(
+        Array.from({ length: N }, (_, i) => i),
+        (i) =>
+          c.Ping({ message: `m-${i}` }).pipe(Effect.timeout("10 seconds")),
+        { concurrency: 32 },
+      );
+
+      expect(results).toHaveLength(N);
+      for (let i = 0; i < N; i++) {
+        expect(results[i].echo).toBe(`m-${i}`);
+      }
+    }).pipe(Effect.scoped, Effect.provide(rpcClientLayer(url)));
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "RpcWorker + RpcDurableObjectNamespace: 100 concurrent *DO unary RPCs do not hang",
+  Effect.gen(function* () {
+    const { url } = yield* rpcWorkerStack;
+
+    yield* Effect.gen(function* () {
+      const c = yield* RpcClient.make(RpcWorkerWorkerRpcs);
+
+      const N = 100;
+      const results = yield* Effect.forEach(
+        Array.from({ length: N }, (_, i) => i),
+        (i) =>
+          c.PingDO({ message: `m-${i}` }).pipe(Effect.timeout("10 seconds")),
+        { concurrency: 16 },
+      );
+
+      expect(results).toHaveLength(N);
+      for (let i = 0; i < N; i++) {
+        expect(results[i].echo).toBe(`m-${i}`);
+      }
+    }).pipe(Effect.scoped, Effect.provide(rpcClientLayer(url)));
+  }).pipe(logLevel),
+  { timeout: 180_000 },
+);
+
+test(
+  "RpcWorker + RpcDurableObjectNamespace: 100 concurrent streaming *DO RPCs do not hang",
+  Effect.gen(function* () {
+    const { url } = yield* rpcWorkerStack;
+
+    yield* Effect.gen(function* () {
+      const c = yield* RpcClient.make(RpcWorkerWorkerRpcs);
+
+      const N = 100;
+      const results = yield* Effect.forEach(
+        Array.from({ length: N }, (_, i) => i),
+        (i) =>
+          c
+            .CountDO({ upto: 3 + (i % 3) })
+            .pipe(Stream.runCollect, Effect.timeout("10 seconds")),
+        { concurrency: 16 },
+      );
+
+      expect(results).toHaveLength(N);
+      for (let i = 0; i < N; i++) {
+        expect(results[i]).toEqual(
+          Array.from({ length: 3 + (i % 3) }, (_, n) => n + 1),
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(rpcClientLayer(url)));
   }).pipe(logLevel),
   { timeout: 180_000 },
