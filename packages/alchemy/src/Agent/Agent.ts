@@ -82,11 +82,13 @@ export const Tool: {
     ...references: References
   ) => any;
 } = ((...args: any[]): any => {
-  // Tool<Self>() — returns the curried tag form
+  // `Tool<Self>()` (zero args) — return the id-taker directly. The
+  // outer `()` in the type signature carries the `Self` phantom only;
+  // at runtime we strip that level by invoking `toolTagForm()` once.
   if (args.length === 0) {
-    return toolTagForm;
+    return toolTagForm();
   }
-  // Tool(id) — returns the inline form (template) => (handler) => Class
+  // `Tool(id)` — return the inline form `(template) => (handler) => Class`.
   return toolInlineForm(args[0] as string);
 }) as any;
 
@@ -212,7 +214,10 @@ export const Agent: {
     new (_: never): AgentInstance;
   };
 } = ((...args: any[]): any => {
-  if (args.length === 0) return agentTagForm;
+  // `Agent<Self>()` (zero args) — return the id-taker directly. Same
+  // shape as `Tool<Self>()` — the outer `()` is just the phantom
+  // carrier; strip it at runtime.
+  if (args.length === 0) return agentTagForm();
   return agentInlineForm(args[0] as string);
 }) as any;
 
