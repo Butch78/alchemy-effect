@@ -1,5 +1,6 @@
 import type * as cf from "@cloudflare/workers-types";
 import * as Context from "effect/Context";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { RuntimeContext } from "../../RuntimeContext.ts";
@@ -10,21 +11,28 @@ import { isWorkerEvent } from "./Worker.ts";
  * Effect-native wrapper around Cloudflare's
  * [`ForwardableEmailMessage`](https://developers.cloudflare.com/email-routing/email-workers/runtime-api/#forwardableemailmessage).
  *
- * The envelope (`from`, `to`, `headers`, `raw`, `rawSize`) is exposed
- * verbatim; the action methods (`forward`, `reply`, `setReject`) return
- * `Effect`s instead of `Promise`/`void`.
+ * Follows the same shape as the other Cloudflare bindings (R2, KV, …):
+ *
+ * - `raw` is the underlying `cf.ForwardableEmailMessage` — an escape
+ *   hatch for any field or future API not yet wrapped.
+ * - Ergonomic fields (`from`, `to`, `headers`, `body`, `bodySize`) are
+ *   forwarded verbatim.
+ * - Action methods (`forward`, `reply`, `setReject`) return `Effect`s
+ *   instead of `Promise`/`void`.
  */
 export interface ForwardableEmailMessage {
+  /** Underlying Cloudflare message — escape hatch for unwrapped APIs. */
+  readonly raw: cf.ForwardableEmailMessage;
   /** Envelope From address. */
   readonly from: string;
   /** Envelope To address. */
   readonly to: string;
   /** RFC 5322 headers. */
   readonly headers: cf.Headers;
-  /** Raw message body stream. */
-  readonly raw: cf.ReadableStream<Uint8Array>;
+  /** Raw message body stream (RFC 5322 wire bytes). */
+  readonly body: cf.ReadableStream<Uint8Array>;
   /** Size of the raw message body in bytes. */
-  readonly rawSize: number;
+  readonly bodySize: number;
   /**
    * Reject this message back to the connecting client with a permanent
    * SMTP error and the given reason.
@@ -46,40 +54,44 @@ export interface ForwardableEmailMessage {
   reply(message: cf.EmailMessage): Effect.Effect<void, EmailError>;
 }
 
-export class EmailError extends Error {
-  readonly _tag = "EmailError";
-  constructor(
-    readonly action: "forward" | "reply",
-    readonly cause: unknown,
-  ) {
-    super(
-      `Cloudflare email ${action} failed: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`,
-    );
-  }
-}
+export class EmailError extends Data.TaggedError("EmailError")<{
+  action: "forward" | "reply";
+  message: string;
+  cause: unknown;
+}> {}
 
-const wrap = (
-  message: cf.ForwardableEmailMessage,
-): ForwardableEmailMessage => ({
-  from: message.from,
-  to: message.to,
-  headers: message.headers,
-  raw: message.raw,
-  rawSize: message.rawSize,
-  setReject: (reason) => Effect.sync(() => message.setReject(reason)),
+const wrap = (raw: cf.ForwardableEmailMessage): ForwardableEmailMessage => ({
+  raw,
+  from: raw.from,
+  to: raw.to,
+  headers: raw.headers,
+  body: raw.raw,
+  bodySize: raw.rawSize,
+  setReject: (reason) => Effect.sync(() => raw.setReject(reason)),
   forward: (rcptTo, headers) =>
     Effect.tryPromise({
-      try: () => message.forward(rcptTo, headers),
-      catch: (cause) => new EmailError("forward", cause),
+      try: () => raw.forward(rcptTo, headers),
+      catch: (cause) =>
+        new EmailError({
+          action: "forward",
+          message: `Cloudflare email forward failed: ${formatCause(cause)}`,
+          cause,
+        }),
     }),
   reply: (msg) =>
     Effect.tryPromise({
-      try: () => message.reply(msg),
-      catch: (cause) => new EmailError("reply", cause),
+      try: () => raw.reply(msg),
+      catch: (cause) =>
+        new EmailError({
+          action: "reply",
+          message: `Cloudflare email reply failed: ${formatCause(cause)}`,
+          cause,
+        }),
     }),
 });
+
+const formatCause = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
 
 /**
  * Subscribe to Cloudflare Email Worker events with an Effect handler.
