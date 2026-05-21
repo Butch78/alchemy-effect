@@ -72,3 +72,29 @@ test(
   }).pipe(logLevel),
   { timeout: 60_000 },
 );
+
+test(
+  "RpcWorker.bind: 100 concurrent ProxyGreet calls do not hang",
+  Effect.gen(function* () {
+    const { callerUrl } = yield* stack;
+    yield* Effect.gen(function* () {
+      const client = yield* RpcClient.make(CallerRpcs);
+
+      const N = 100;
+      const results = yield* Effect.forEach(
+        Array.from({ length: N }, (_, i) => i),
+        (i) =>
+          client
+            .ProxyGreet({ name: `peer-${i}` })
+            .pipe(Effect.timeout("10 seconds")),
+        { concurrency: 32 },
+      );
+
+      expect(results).toHaveLength(N);
+      for (let i = 0; i < N; i++) {
+        expect(results[i].greeting).toBe(`hello peer-${i}`);
+      }
+    }).pipe(Effect.scoped, Effect.provide(clientLayer(callerUrl)));
+  }).pipe(logLevel),
+  { timeout: 120_000 },
+);
