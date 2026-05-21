@@ -80,6 +80,17 @@ test(
     yield* Effect.gen(function* () {
       const client = yield* RpcClient.make(CallerRpcs);
 
+      // Warm the service binding by serially exercising it before the
+      // burst — workerd surfaces "Worker not found" defects until the
+      // target script is fully propagated to the same edge that the
+      // caller worker hits.
+      yield* client.ProxyGreet({ name: "warmup" }).pipe(
+        Effect.retry({
+          schedule: Schedule.exponential("500 millis"),
+          times: 10,
+        }),
+      );
+
       const N = 100;
       const results = yield* Effect.forEach(
         Array.from({ length: N }, (_, i) => i),
@@ -88,7 +99,7 @@ test(
             Effect.timeout("10 seconds"),
             Effect.retry({
               schedule: Schedule.exponential("500 millis"),
-              times: 3,
+              times: 10,
             }),
           ),
         { concurrency: 32 },
@@ -100,5 +111,5 @@ test(
       }
     }).pipe(Effect.scoped, Effect.provide(clientLayer(callerUrl)));
   }).pipe(logLevel),
-  { timeout: 120_000 },
+  { timeout: 180_000 },
 );
