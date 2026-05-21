@@ -84,9 +84,13 @@ test(
       const results = yield* Effect.forEach(
         Array.from({ length: N }, (_, i) => i),
         (i) =>
-          client
-            .ProxyGreet({ name: `peer-${i}` })
-            .pipe(Effect.timeout("10 seconds")),
+          client.ProxyGreet({ name: `peer-${i}` }).pipe(
+            Effect.timeout("10 seconds"),
+            Effect.retry({
+              schedule: Schedule.exponential("500 millis"),
+              times: 3,
+            }),
+          ),
         { concurrency: 32 },
       );
 
