@@ -1,137 +1,144 @@
 ---
-title: Connect Neon with Hyperdrive
-description: Provision a serverless Neon Postgres database and front it with Cloudflare Hyperdrive so your Worker reaches it with edge-pooled, low-latency connections.
+title: Connect PlanetScale MySQL with Hyperdrive
+description: Provision a PlanetScale (Vitess-backed) MySQL database and front it with Cloudflare Hyperdrive so your Worker reaches it with edge-pooled, low-latency connections.
 sidebar:
-  order: 7
+  order: 9
 ---
 
 import { Code, Tabs, TabItem } from "@astrojs/starlight/components";
 
-export const pgDeps = `@effect/sql-pg`;
+export const mysqlDeps = `@effect/sql-mysql2`;
 
-You've now wired Durable Objects, hibernatable WebSockets, a
-Container, a Workflow, and an AI Gateway into your Worker. The
-last missing piece for most apps is a real database. This tutorial
-provisions **Neon** — serverless Postgres with copy-on-write
-branching — and fronts it with **Cloudflare Hyperdrive**, then
-binds the connection into your Worker.
+This tutorial provisions a **PlanetScale MySQL** cluster —
+Vitess-backed MySQL with the same branching model as PlanetScale
+Postgres — and fronts it with **Cloudflare Hyperdrive**, then binds
+the connection into your Worker.
 
 Hyperdrive is a Cloudflare-managed pooler that sits between
 Workers and your origin database. The Worker sees a familiar
-Postgres connection string, but the connection itself is already
+MySQL connection string, but the connection itself is already
 pooled at the edge — no per-request TCP handshakes, no cold-start
 connection storms.
 
-> Prefer PlanetScale? See
-> [Connect PlanetScale Postgres with Hyperdrive](/tutorial/cloudflare/planetscale-postgres-hyperdrive)
+> Prefer Postgres? See
+> [Connect Neon with Hyperdrive](/tutorial/cloudflare/neon-hyperdrive)
 > or
-> [Connect PlanetScale MySQL with Hyperdrive](/tutorial/cloudflare/planetscale-mysql-hyperdrive).
+> [Connect PlanetScale Postgres with Hyperdrive](/tutorial/cloudflare/planetscale-postgres-hyperdrive).
 
-## Add the Neon provider
+## Add the PlanetScale provider
 
-`Neon.providers()` is its own layer. Register it alongside
+`Planetscale.providers()` is its own layer. Register it alongside
 `Cloudflare.providers()` in your stack:
 
 ```diff lang="typescript"
 // alchemy.run.ts
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
-+import * as Neon from "alchemy/Neon";
++import * as Planetscale from "alchemy/Planetscale";
 +import * as Layer from "effect/Layer";
 
 export default Alchemy.Stack(
   "MyStack",
   {
 -    providers: Cloudflare.providers(),
-+    providers: Layer.mergeAll(Cloudflare.providers(), Neon.providers()),
++    providers: Layer.mergeAll(Cloudflare.providers(), Planetscale.providers()),
     state: Alchemy.localState(),
   },
   // ...
 );
 ```
 
-Neon's auth is API-key-based. The first `bun alchemy login` after
-this change adds a `Neon` step that either reads `NEON_API_KEY`
-from the environment (good for CI) or stores a key under
-`~/.alchemy/credentials/<profile>/neon-stored.json`.
+PlanetScale's auth uses an API token id + secret. `bun alchemy login`
+adds a `Planetscale` step that either reads `PLANETSCALE_API_TOKEN_ID`,
+`PLANETSCALE_API_TOKEN`, and `PLANETSCALE_ORGANIZATION` from the
+environment (good for CI) or stores the credentials under
+`~/.alchemy/credentials/<profile>/planetscale-stored.json`.
 
 ## Provision the database
 
-Create `src/Db.ts`. A `Neon.Project` is the top-level container —
-it owns a default branch, a default role, and the WAL history that
-copy-on-write branches fork from:
+Create `src/Db.ts`. `Planetscale.MySQLDatabase` is the long-lived
+cluster, `MySQLBranch` is a branch off of it (cheap to fork for
+previews), and `MySQLPassword` materializes a user + password we
+can feed to Hyperdrive:
 
 ```typescript
 // src/Db.ts
-import * as Neon from "alchemy/Neon";
+import * as Planetscale from "alchemy/Planetscale";
 import * as Effect from "effect/Effect";
 
 export const Db = Effect.gen(function* () {
-  const project = yield* Neon.Project("app-db", {
-    region: "aws-us-east-1",
+  const database = yield* Planetscale.MySQLDatabase("app-db", {
+    region: { slug: "us-east" },
+    clusterSize: "PS_10",
+    allowForeignKeyConstraints: true,
   });
 
-  const branch = yield* Neon.Branch("app-branch", {
-    project,
+  const branch = yield* Planetscale.MySQLBranch("app-branch", {
+    database,
+    isProduction: false,
   });
 
-  return { project, branch };
+  const password = yield* Planetscale.MySQLPassword("app-password", {
+    database,
+    branch,
+    role: "readwriter",
+  });
+
+  return { database, branch, password };
 });
 ```
 
-`Neon.Branch` is a copy-on-write fork — cheap to create, fast to
-destroy, and ideal for preview environments. Each branch has its
-own connection string (`branch.connectionUri`) and a pooled variant
-(`branch.pooledConnectionUri`).
+The password's `origin` (host / port / database / user / password)
+is what Hyperdrive consumes — it's materialized lazily so the
+actual secret never lands in plan output.
 
 ## Put Hyperdrive in front
 
 Hyperdrive needs an `origin` describing where your database lives.
-`branch.origin` is a pre-parsed `{ scheme, host, port, database,
+`password.origin` is a pre-parsed `{ scheme, host, port, database,
 user, password }` output ready to feed straight in:
 
 ```diff lang="typescript"
 // src/Db.ts
 +import * as Cloudflare from "alchemy/Cloudflare";
-import * as Neon from "alchemy/Neon";
+import * as Planetscale from "alchemy/Planetscale";
 import * as Effect from "effect/Effect";
 
 export const Db = Effect.gen(function* () {
-  const project = yield* Neon.Project("app-db", { region: "aws-us-east-1" });
-  const branch = yield* Neon.Branch("app-branch", { project });
-  return { project, branch };
+  // ...
+  return { database, branch, password };
 });
 
 +export const Hyperdrive = Effect.gen(function* () {
-+  const { branch } = yield* Db;
++  const { password } = yield* Db;
 +  return yield* Cloudflare.Hyperdrive("app-hyperdrive", {
-+    origin: branch.origin,
++    origin: password.origin,
 +  });
 +});
 ```
 
-`branch.origin` points at the **direct** (non-pooled) Neon endpoint —
-the recommended target when sitting behind Hyperdrive, since
-Hyperdrive already does its own connection pooling.
+Its `scheme` is `"mysql"`, so Hyperdrive provisions a MySQL pooler.
+The `origin` is an `Output`, so alchemy orders `MySQLDatabase` →
+`MySQLBranch` → `MySQLPassword` → `Hyperdrive` on the deploy graph.
 
 ## Install the client library
 
-The Worker uses [`@effect/sql-pg`](https://effect.website/docs/sql/introduction)
-— Effect's Postgres client (bundles [`pg`](https://node-postgres.com)
-under the hood):
+The Worker uses [`@effect/sql-mysql2`](https://effect.website/docs/sql/introduction)
+— Effect's MySQL client (bundles
+[`mysql2`](https://github.com/sidorares/node-mysql2) under the hood):
 
 <Tabs syncKey="pkgManager">
   <TabItem label="bun" icon="bun">
-    <Code code={`bun add ${pgDeps}`} lang="sh" />
+    <Code code={`bun add ${mysqlDeps}`} lang="sh" />
   </TabItem>
   <TabItem label="npm" icon="npm">
-    <Code code={`npm install ${pgDeps}`} lang="sh" />
+    <Code code={`npm install ${mysqlDeps}`} lang="sh" />
   </TabItem>
   <TabItem label="pnpm" icon="pnpm">
-    <Code code={`pnpm add ${pgDeps}`} lang="sh" />
+    <Code code={`pnpm add ${mysqlDeps}`} lang="sh" />
   </TabItem>
   <TabItem label="yarn" icon="seti:yarn">
-    <Code code={`yarn add ${pgDeps}`} lang="sh" />
+    <Code code={`yarn add ${mysqlDeps}`} lang="sh" />
   </TabItem>
 </Tabs>
 
@@ -140,7 +147,7 @@ under the hood):
 `Cloudflare.Hyperdrive.bind(...)` resolves the runtime accessor for
 the binding — `connectionString`, `host`, `port`, `user`,
 `password`, `database`, plus a `raw` escape hatch. Yield it once at
-init and add the `nodejs_compat` flag so the underlying Postgres
+init and add the `nodejs_compat` flag so the underlying MySQL
 driver can run inside a Worker:
 
 ```diff lang="typescript"
@@ -155,7 +162,7 @@ export default class Api extends Cloudflare.Worker<Api>()(
   {
     main: import.meta.path,
 +    compatibility: {
-+      // @effect/sql-pg uses pg under the hood,
++      // @effect/sql-mysql2 uses mysql2 under the hood,
 +      // which needs Node's `net` and `crypto` APIs.
 +      flags: ["nodejs_compat"],
 +    },
@@ -178,13 +185,13 @@ real request is in flight, never at init.
 
 ## Derive a SQL client layer from the binding
 
-Wrap `PgClient.layer({ url })` in `Layer.unwrapEffect` so layer
+Wrap `MysqlClient.layer({ url })` in `Layer.unwrapEffect` so layer
 construction is deferred until the Effect it's provided to actually
 runs. That's what reads `hd.connectionString` lazily — under the
 request's runtime context, not at init.
 
 ```diff lang="typescript"
-+import * as PgClient from "@effect/sql-pg/PgClient";
++import * as MysqlClient from "@effect/sql-mysql2/MysqlClient";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 +import * as Layer from "effect/Layer";
@@ -193,13 +200,13 @@ import * as Effect from "effect/Effect";
     const hd = yield* Cloudflare.Hyperdrive.bind(Hyperdrive);
 +   const SqlLive = Layer.unwrapEffect(
 +     hd.connectionString.pipe(
-+       Effect.map((url) => PgClient.layer({ url })),
++       Effect.map((url) => MysqlClient.layer({ url })),
 +     ),
 +   );
 ```
 
-`PgClient.layer` provides both the engine client (`PgClient`) and
-the generic `SqlClient` tag, so downstream code can stay
+`MysqlClient.layer` provides both the engine client (`MysqlClient`)
+and the generic `SqlClient` tag, so downstream code can stay
 engine-agnostic.
 
 ## Query inside `fetch` and provide the layer
@@ -216,7 +223,7 @@ built when the request runs (with `RuntimeContext` in scope):
       fetch: Effect.gen(function* () {
 -       return HttpServerResponse.text("ok");
 +       const sql = yield* SqlClient.SqlClient;
-+       const rows = yield* sql`SELECT now() as now`;
++       const rows = yield* sql`SELECT NOW() as now`;
 +       return yield* HttpServerResponse.json({ ok: true, rows });
 -     }),
 +     }).pipe(Effect.provide(SqlLive)),
@@ -255,15 +262,15 @@ export default Alchemy.Stack(
 bun alchemy deploy
 ```
 
-Watch the deploy plan: alchemy creates the Neon project, then the
-branch, then the Hyperdrive that points at the branch's origin,
-then the Worker with the Hyperdrive binding attached. After it
-completes, hit your Worker URL and you should see something like:
+Watch the deploy plan: alchemy creates the MySQLDatabase, then the
+branch, then the password, then the Hyperdrive that points at the
+password's origin, then the Worker with the Hyperdrive binding
+attached. After it completes, hit your Worker URL and you should
+see something like:
 
 ```json
 { "ok": true, "rows": [{ "now": "2026-05-04T07:53:48.123Z" }] }
 ```
 
-You're now talking to Neon from the edge through Hyperdrive. The
-next tutorial swaps the raw driver client for **Drizzle ORM** and
-lets alchemy own migration generation as part of every deploy.
+You're now talking to PlanetScale MySQL from the edge through
+Hyperdrive.

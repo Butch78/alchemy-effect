@@ -1,20 +1,18 @@
 ---
-title: Connect Neon with Hyperdrive
-description: Provision a serverless Neon Postgres database and front it with Cloudflare Hyperdrive so your Worker reaches it with edge-pooled, low-latency connections.
+title: Connect PlanetScale Postgres with Hyperdrive
+description: Provision a PlanetScale Postgres database and front it with Cloudflare Hyperdrive so your Worker reaches it with edge-pooled, low-latency connections.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 import { Code, Tabs, TabItem } from "@astrojs/starlight/components";
 
 export const pgDeps = `@effect/sql-pg`;
 
-You've now wired Durable Objects, hibernatable WebSockets, a
-Container, a Workflow, and an AI Gateway into your Worker. The
-last missing piece for most apps is a real database. This tutorial
-provisions **Neon** — serverless Postgres with copy-on-write
-branching — and fronts it with **Cloudflare Hyperdrive**, then
-binds the connection into your Worker.
+This tutorial provisions a **PlanetScale Postgres** cluster —
+managed Postgres with branch-per-PR workflows — and fronts it with
+**Cloudflare Hyperdrive**, then binds the connection into your
+Worker.
 
 Hyperdrive is a Cloudflare-managed pooler that sits between
 Workers and your origin database. The Worker sees a familiar
@@ -22,97 +20,105 @@ Postgres connection string, but the connection itself is already
 pooled at the edge — no per-request TCP handshakes, no cold-start
 connection storms.
 
-> Prefer PlanetScale? See
-> [Connect PlanetScale Postgres with Hyperdrive](/tutorial/cloudflare/planetscale-postgres-hyperdrive)
+> Prefer a different engine? See
+> [Connect Neon with Hyperdrive](/tutorial/cloudflare/neon-hyperdrive)
 > or
 > [Connect PlanetScale MySQL with Hyperdrive](/tutorial/cloudflare/planetscale-mysql-hyperdrive).
 
-## Add the Neon provider
+## Add the PlanetScale provider
 
-`Neon.providers()` is its own layer. Register it alongside
+`Planetscale.providers()` is its own layer. Register it alongside
 `Cloudflare.providers()` in your stack:
 
 ```diff lang="typescript"
 // alchemy.run.ts
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
-+import * as Neon from "alchemy/Neon";
++import * as Planetscale from "alchemy/Planetscale";
 +import * as Layer from "effect/Layer";
 
 export default Alchemy.Stack(
   "MyStack",
   {
 -    providers: Cloudflare.providers(),
-+    providers: Layer.mergeAll(Cloudflare.providers(), Neon.providers()),
++    providers: Layer.mergeAll(Cloudflare.providers(), Planetscale.providers()),
     state: Alchemy.localState(),
   },
   // ...
 );
 ```
 
-Neon's auth is API-key-based. The first `bun alchemy login` after
-this change adds a `Neon` step that either reads `NEON_API_KEY`
-from the environment (good for CI) or stores a key under
-`~/.alchemy/credentials/<profile>/neon-stored.json`.
+PlanetScale's auth uses an API token id + secret. `bun alchemy login`
+adds a `Planetscale` step that either reads `PLANETSCALE_API_TOKEN_ID`,
+`PLANETSCALE_API_TOKEN`, and `PLANETSCALE_ORGANIZATION` from the
+environment (good for CI) or stores the credentials under
+`~/.alchemy/credentials/<profile>/planetscale-stored.json`.
 
 ## Provision the database
 
-Create `src/Db.ts`. A `Neon.Project` is the top-level container —
-it owns a default branch, a default role, and the WAL history that
-copy-on-write branches fork from:
+Create `src/Db.ts`. `Planetscale.PostgresDatabase` owns the
+long-lived cluster, `PostgresBranch` is a branch off of it (cheap
+to fork for previews), and `PostgresRole` materializes a user +
+password we can feed to Hyperdrive:
 
 ```typescript
 // src/Db.ts
-import * as Neon from "alchemy/Neon";
+import * as Planetscale from "alchemy/Planetscale";
 import * as Effect from "effect/Effect";
 
 export const Db = Effect.gen(function* () {
-  const project = yield* Neon.Project("app-db", {
-    region: "aws-us-east-1",
+  const database = yield* Planetscale.PostgresDatabase("app-db", {
+    region: { slug: "us-east" },
+    clusterSize: "PS_10",
   });
 
-  const branch = yield* Neon.Branch("app-branch", {
-    project,
+  const branch = yield* Planetscale.PostgresBranch("app-branch", {
+    database,
+    isProduction: false,
   });
 
-  return { project, branch };
+  const role = yield* Planetscale.PostgresRole("app-role", {
+    database,
+    branch,
+    inheritedRoles: ["postgres"],
+  });
+
+  return { database, branch, role };
 });
 ```
 
-`Neon.Branch` is a copy-on-write fork — cheap to create, fast to
-destroy, and ideal for preview environments. Each branch has its
-own connection string (`branch.connectionUri`) and a pooled variant
-(`branch.pooledConnectionUri`).
+The role's `origin` (host / port / database / user / password) is
+what Hyperdrive consumes — it's materialized lazily so the actual
+password never lands in plan output.
 
 ## Put Hyperdrive in front
 
 Hyperdrive needs an `origin` describing where your database lives.
-`branch.origin` is a pre-parsed `{ scheme, host, port, database,
+`role.origin` is a pre-parsed `{ scheme, host, port, database,
 user, password }` output ready to feed straight in:
 
 ```diff lang="typescript"
 // src/Db.ts
 +import * as Cloudflare from "alchemy/Cloudflare";
-import * as Neon from "alchemy/Neon";
+import * as Planetscale from "alchemy/Planetscale";
 import * as Effect from "effect/Effect";
 
 export const Db = Effect.gen(function* () {
-  const project = yield* Neon.Project("app-db", { region: "aws-us-east-1" });
-  const branch = yield* Neon.Branch("app-branch", { project });
-  return { project, branch };
+  // ...
+  return { database, branch, role };
 });
 
 +export const Hyperdrive = Effect.gen(function* () {
-+  const { branch } = yield* Db;
++  const { role } = yield* Db;
 +  return yield* Cloudflare.Hyperdrive("app-hyperdrive", {
-+    origin: branch.origin,
++    origin: role.origin,
 +  });
 +});
 ```
 
-`branch.origin` points at the **direct** (non-pooled) Neon endpoint —
-the recommended target when sitting behind Hyperdrive, since
-Hyperdrive already does its own connection pooling.
+The `origin` is an `Output`, so alchemy orders `PostgresDatabase` →
+`PostgresBranch` → `PostgresRole` → `Hyperdrive` on the deploy
+graph.
 
 ## Install the client library
 
@@ -255,15 +261,17 @@ export default Alchemy.Stack(
 bun alchemy deploy
 ```
 
-Watch the deploy plan: alchemy creates the Neon project, then the
-branch, then the Hyperdrive that points at the branch's origin,
-then the Worker with the Hyperdrive binding attached. After it
-completes, hit your Worker URL and you should see something like:
+Watch the deploy plan: alchemy creates the PostgresDatabase, then
+the branch, then the role, then the Hyperdrive that points at the
+role's origin, then the Worker with the Hyperdrive binding
+attached. After it completes, hit your Worker URL and you should
+see something like:
 
 ```json
 { "ok": true, "rows": [{ "now": "2026-05-04T07:53:48.123Z" }] }
 ```
 
-You're now talking to Neon from the edge through Hyperdrive. The
-next tutorial swaps the raw driver client for **Drizzle ORM** and
-lets alchemy own migration generation as part of every deploy.
+You're now talking to PlanetScale Postgres from the edge through
+Hyperdrive. The next tutorial swaps the raw driver client for
+**Drizzle ORM** and lets alchemy own migration generation as part
+of every deploy.
