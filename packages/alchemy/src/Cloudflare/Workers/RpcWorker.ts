@@ -1,7 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type * as Scope from "effect/Scope";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
@@ -100,40 +99,28 @@ export interface RpcWorkerClass extends Effect.Effect<
    * worker's declared rpc {@link RpcGroup.RpcGroup} schema. Mirrors
    * `Cloudflare.R2Bucket.bind(MyBucket)` and friends.
    *
-   * Two-step contract:
-   *
-   * 1. Yield once at **init** to register the service binding on the
-   *    surrounding worker. The yield resolves to an
-   *    `Effect<RpcClient>` *factory*.
-   * 2. Yield the factory inside each per-request handler to build a
-   *    fresh `RpcClient`. A fresh client is required because Cloudflare
-   *    rejects I/O objects (the service-binding `stub.fetch` body)
-   *    created on a previous request.
+   * Yield once at **init** — the result is a normal `RpcClient` you
+   * can call directly from any per-request handler. Internally each
+   * method invocation builds a fresh underlying `RpcClient` (through
+   * a Proxy) because Cloudflare rejects I/O objects created on a
+   * previous request; this is hidden from the consumer.
    *
    * Pair with {@link RpcWorker} on the server side; both ends share
    * the same schema so values round-trip through one `Schema` codec.
    *
    * @example
    * ```ts
-   * // INIT: register the binding once
-   * const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
+   * // INIT: register the binding once and get the typed client
+   * const tasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
    *
-   * // PER-REQUEST: build a fresh client and call through
-   * proxyGetTask: ({ id }) =>
-   *   Effect.gen(function* () {
-   *     const tasks = yield* makeTasks;
-   *     return yield* tasks.getTask({ id });
-   *   }),
+   * // PER-REQUEST: call methods directly
+   * proxyGetTask: ({ id }) => tasks.getTask({ id }),
    * ```
    */
   readonly bind: <Self, Rpcs extends Rpc.Any>(
     workerEff: RpcWorkerYieldable<Self, Rpcs>,
   ) => Effect.Effect<
-    Effect.Effect<
-      RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError> & RpcShape<Self>,
-      never,
-      Scope.Scope
-    >,
+    RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError> & RpcShape<Self>,
     never,
     Worker
   >;
@@ -143,11 +130,7 @@ export interface RpcWorkerClass extends Effect.Effect<
 const bind = <Self, Rpcs extends Rpc.Any>(
   workerEff: RpcWorkerYieldable<Self, Rpcs>,
 ): Effect.Effect<
-  Effect.Effect<
-    RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError> & RpcShape<Self>,
-    never,
-    Scope.Scope
-  >,
+  RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError> & RpcShape<Self>,
   never,
   Worker
 > =>
@@ -163,10 +146,10 @@ const bind = <Self, Rpcs extends Rpc.Any>(
       );
     }
     const worker = (yield* workerEff) as Worker;
-    // Register the service binding on the surrounding worker. Mirrors
-    // `Cloudflare.bindWorker` — yielding the class is *not* enough; we
-    // need an explicit `self.bind\`${worker}\`(...)` so workerd surfaces
-    // the stub on `env` at request time.
+    // Register the service binding on the surrounding worker at INIT.
+    // Mirrors `Cloudflare.bindWorker` — yielding the class is *not*
+    // enough; we need an explicit `self.bind\`${worker}\`(...)` so
+    // workerd surfaces the stub on `env` at request time.
     const self = yield* WorkerCtor;
     yield* self.bind`${worker}`({
       bindings: [
@@ -177,49 +160,67 @@ const bind = <Self, Rpcs extends Rpc.Any>(
         },
       ],
     });
-    // A fresh `RpcClient` is built per request. Cloudflare workers
-    // reject I/O objects (the service-binding `stub.fetch` body) that
-    // were created on a previous request — any cached client breaks
-    // with "Cannot perform I/O on behalf of a different request" the
-    // moment a second request arrives. Callers `yield*` the returned
-    // factory Effect once per request.
-    // Wrap the Cloudflare service-binding stub (Promise-based fetch)
-    // into an Effect HttpClient. `RpcClient.layerProtocolHttp` runs
-    // each call through this client so requests are dispatched via
-    // `stub.fetch(...)` rather than the public network.
-    const httpClient = HttpClient.layerMergedContext(
-      Effect.map(WorkerEnvironment, (env) => {
-        const stub = (env as Record<string, { fetch: typeof fetch }>)[
-          worker.LogicalId
-        ];
-        return HttpClient.make((req) =>
-          Effect.promise((signal) =>
-            stub.fetch(
-              new Request(req.url, {
-                method: req.method,
-                headers: new Headers(req.headers as any),
-                body: (req.body as any)?.body ?? undefined,
-                signal,
-              }),
-            ),
-          ).pipe(Effect.map((res) => HttpClientResponse.fromWeb(req, res))),
-        );
-      }),
-    );
-    const protocol = RpcClient.layerProtocolHttp({
-      url: "http://alchemy-rpc-worker/",
-    }).pipe(
-      Layer.provide(RpcSerialization.layerNdjson),
-      Layer.provide(httpClient),
-    );
-    const factory = RpcClient.make(schema).pipe(
-      Effect.provide(protocol),
-    ) as unknown as Effect.Effect<
-      RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError> & RpcShape<Self>,
-      never,
-      Scope.Scope
-    >;
-    return factory;
+
+    // Build a per-call factory that wraps the Cloudflare service-
+    // binding stub (Promise-based fetch) into an Effect `HttpClient`,
+    // then `RpcClient.make` over that transport. Each call gets its
+    // own `RpcClient` because Cloudflare rejects I/O objects (the
+    // stub.fetch body) that were created on a previous request.
+    const makeFreshClient = Effect.gen(function* () {
+      const env = yield* WorkerEnvironment;
+      const stub = (env as Record<string, { fetch: typeof fetch }>)[
+        worker.LogicalId
+      ];
+      const httpClient = HttpClient.make((req) =>
+        Effect.promise((signal) =>
+          stub.fetch(
+            new Request(req.url, {
+              method: req.method,
+              headers: new Headers(req.headers as any),
+              body: (req.body as any)?.body ?? undefined,
+              signal,
+            }),
+          ),
+        ).pipe(Effect.map((res) => HttpClientResponse.fromWeb(req, res))),
+      );
+      const protocol = RpcClient.layerProtocolHttp({
+        url: "http://alchemy-rpc-worker/",
+      }).pipe(
+        Layer.provide(RpcSerialization.layerNdjson),
+        Layer.provide(Layer.succeed(HttpClient.HttpClient, httpClient)),
+      );
+      return yield* RpcClient.make(schema).pipe(Effect.provide(protocol));
+    });
+
+    // Return a Proxy that LOOKS like an `RpcClient<Rpcs>` but defers
+    // the actual `RpcClient` construction to call time. Mirrors
+    // `makeRpcStub` from `./Rpc.ts`: each method invocation builds a
+    // fresh client, runs the call inside `Effect.scoped`, and tears
+    // the client's scope down with the call. From the consumer's
+    // perspective this is a normal `RpcClient`:
+    //
+    //   const tasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
+    //   yield* tasks.getTask({ id: "abc" });
+    return new Proxy(
+      {},
+      {
+        get: (_target, method) => {
+          if (typeof method !== "string") return undefined;
+          return (...args: unknown[]) =>
+            Effect.gen(function* () {
+              const client = yield* makeFreshClient;
+              const fn = (
+                client as unknown as Record<
+                  string,
+                  (...a: unknown[]) => Effect.Effect<unknown, unknown, unknown>
+                >
+              )[method];
+              return yield* fn(...args);
+            }).pipe(Effect.scoped);
+        },
+      },
+    ) as RpcClient.RpcClient<Rpcs, RpcClientError.RpcClientError> &
+      RpcShape<Self>;
   });
 
 /**
@@ -303,11 +304,13 @@ const bind = <Self, Rpcs extends Rpc.Any>(
  *
  * @section Binding it from another worker
  * @example `Cloudflare.RpcWorker.bind(WorkerClass)`
- * Inside another worker's init, `RpcWorker.bind(WorkerClass)` runs at
- * **init**, registers the service binding on the surrounding worker,
- * and returns an `Effect<RpcClient>` *factory*. Each per-request
- * handler yields the factory to build a fresh client (Cloudflare
- * rejects cross-request reuse of the underlying stub I/O).
+ * Inside another worker's init, `RpcWorker.bind(WorkerClass)`
+ * registers the service binding on the surrounding worker and returns
+ * a typed `RpcClient` you can call directly from any per-request
+ * handler. Internally each method invocation builds a fresh underlying
+ * client (because Cloudflare rejects cross-request reuse of the
+ * stub I/O), but that's hidden behind a Proxy so the consumer sees a
+ * normal `RpcClient`.
  * ```typescript
  * import TaskWorker from "./task-worker.ts";
  *
@@ -315,16 +318,12 @@ const bind = <Self, Rpcs extends Rpc.Any>(
  *   "Caller",
  *   { main: import.meta.filename, schema: CallerRpcs },
  *   Effect.gen(function* () {
- *     // INIT: register binding once
- *     const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
+ *     // INIT: register binding, get the typed client
+ *     const tasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
  *
  *     const handlers = CallerRpcs.toLayer({
- *       // PER-REQUEST: fresh client per call
- *       proxyGetTask: ({ id }) =>
- *         Effect.gen(function* () {
- *           const tasks = yield* makeTasks;
- *           return yield* tasks.getTask({ id });
- *         }),
+ *       // PER-REQUEST: just call methods directly
+ *       proxyGetTask: ({ id }) => tasks.getTask({ id }),
  *     });
  *     return RpcServer.toHttpEffect(CallerRpcs).pipe(
  *       Effect.provide(Layer.mergeAll(handlers, RpcSerialization.layerJson)),

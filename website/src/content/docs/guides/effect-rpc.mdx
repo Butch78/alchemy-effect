@@ -588,19 +588,17 @@ returns the same `Worker` resource — but `props.schema` lets a second
 Worker bind a typed client without re-importing `RpcClient`:
 
 ```typescript
-// INIT: register the binding once
-const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
+// INIT: register the binding, get the typed client
+const tasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
 
-// PER-REQUEST: fresh client per call
-proxyGetTask: ({ id }) =>
-  Effect.gen(function* () {
-    const tasks = yield* makeTasks;
-    return yield* tasks.getTask({ id });
-  }),
+// PER-REQUEST: just call methods directly
+proxyGetTask: ({ id }) => tasks.getTask({ id }),
 ```
 
 The bind goes over the in-account service binding (not the public
 internet) and the client is typed by `TaskWorker`'s declared schema.
+A `Proxy` defers each call's underlying `RpcClient` construction so
+Cloudflare's "no cross-request I/O" rule is satisfied transparently.
 See the [RPC Worker tutorial](/tutorial/cloudflare/rpc-worker) for an
 end-to-end walk-through.
 

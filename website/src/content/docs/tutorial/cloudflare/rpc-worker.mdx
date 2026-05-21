@@ -310,7 +310,7 @@ export default class Caller extends Cloudflare.RpcWorker<Caller>()(
 
 Same `RpcWorker` shape as before, with its own schema (`CallerRpcs`).
 
-## Register the binding at init
+## Bind the typed client at init
 
 ```diff lang="typescript"
  import * as Cloudflare from "alchemy/Cloudflare";
@@ -322,42 +322,38 @@ Same `RpcWorker` shape as before, with its own schema (`CallerRpcs`).
    "Caller",
    { main: import.meta.filename, schema: CallerRpcs },
    Effect.gen(function* () {
-+    const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
++    const tasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
    }),
  ) {}
 ```
 
-`Cloudflare.RpcWorker.bind(WorkerClass)` runs at **init**, registers
-the service binding on this Worker so workerd surfaces the stub on
-`env`, and returns an `Effect<RpcClient>` *factory* the handlers
-will use.
+`Cloudflare.RpcWorker.bind(WorkerClass)` registers the service
+binding on this Worker so workerd surfaces the stub on `env`, and
+returns a typed `RpcClient` that mirrors `TaskWorker`'s schema.
 
-## Build a fresh client per request
+## Call it from a handler
 
 ```diff lang="typescript"
  Effect.gen(function* () {
-   const makeTasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
+   const tasks = yield* Cloudflare.RpcWorker.bind(TaskWorker);
 +  const handlers = CallerRpcs.toLayer({
-+    proxyGetTask: ({ id }) =>
-+      Effect.gen(function* () {
-+        const tasks = yield* makeTasks;
-+        return yield* tasks.getTask({ id });
-+      }),
++    proxyGetTask: ({ id }) => tasks.getTask({ id }),
 +  });
  }),
 ```
 
-Each per-request handler yields the factory to build a fresh
-`RpcClient`, then calls `tasks.getTask({...})` over the in-account
-service binding. The call is fully typed against `TaskWorker`'s
-schema — success type `string`, error channel includes `TaskNotFound`.
+`tasks.getTask({...})` is just an Effect — fully typed against
+`TaskWorker`'s schema (success type `string`, error channel includes
+`TaskNotFound`). Each call goes over the in-account service binding,
+not the public network.
 
-:::caution[Why a factory and not the client?]
+:::note[How it works under the hood]
 Cloudflare rejects I/O objects (the service-binding `stub.fetch`
-body) created on a previous request. Caching one `RpcClient` across
-requests fails with `"Cannot perform I/O on behalf of a different
-request"` — so each handler yields the factory to build a fresh
-client.
+body) created on a previous request, which means the underlying
+`RpcClient` has to be fresh every call. The bind hides that behind a
+`Proxy`: each method invocation transparently builds a fresh client,
+runs the call inside its own scope, and tears the client down with
+the call. The consumer just sees a normal `RpcClient`.
 :::
 
 ## Return the piped Effect
