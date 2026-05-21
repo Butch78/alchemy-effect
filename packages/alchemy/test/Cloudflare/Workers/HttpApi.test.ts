@@ -118,7 +118,10 @@ test(
         Effect.gen(function* () {
           const created = yield* client.Tasks.createTask({
             payload: { title: `task-${i}` },
-          }).pipe(Effect.timeout(requestTimeout));
+          }).pipe(
+            Effect.timeout(requestTimeout),
+            Effect.retry(readinessRetry),
+          );
           if (created.title !== `task-${i}`) {
             return yield* Effect.fail(
               new Error(`create ${i} title mismatch: ${created.title}`),
@@ -154,14 +157,20 @@ test(
           const title = `do-task-${i}`;
           const created = yield* client.Tasks.createTaskDO({
             payload: { title },
-          }).pipe(Effect.timeout(requestTimeout));
+          }).pipe(
+            Effect.timeout(requestTimeout),
+            Effect.retry(readinessRetry),
+          );
           expect(created.title).toBe(title);
           expect(created.completed).toBe(false);
           expect(created.id).toBeTypeOf("string");
 
           const fetched = yield* client.Tasks.getTaskDO({
             params: { id: created.id },
-          }).pipe(Effect.timeout(requestTimeout));
+          }).pipe(
+            Effect.timeout(requestTimeout),
+            Effect.retry(readinessRetry),
+          );
           expect(fetched.id).toBe(created.id);
           expect(fetched.title).toBe(title);
         }),
