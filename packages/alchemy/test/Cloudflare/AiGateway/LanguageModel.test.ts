@@ -265,7 +265,11 @@ test(
   { timeout: 180_000 },
 );
 
-test(
+// `persisted chat survives across DO invocations` exercises the
+// /chat?id=... route which is wired by `ChatAgent` from the Agent
+// slice. The fixture in this slice (`LanguageModelWorker`) does not
+// include that route — the test re-activates in the Agent PR.
+test.skip(
   "persisted chat survives across DO invocations",
   Effect.gen(function* () {
     const out = yield* stack;
