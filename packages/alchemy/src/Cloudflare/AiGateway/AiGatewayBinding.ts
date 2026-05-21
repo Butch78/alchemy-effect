@@ -3,11 +3,16 @@
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import type { LanguageModel } from "effect/unstable/ai/LanguageModel";
 import * as Binding from "../../Binding.ts";
 import type { ResourceLike } from "../../Resource.ts";
 import type { RuntimeContext } from "../../RuntimeContext.ts";
 import { isWorker, WorkerEnvironment } from "../Workers/Worker.ts";
 import type { AiGateway as AiGatewayResource } from "./AiGateway.ts";
+import {
+  makeLanguageModelLayer,
+  type LanguageModelOptions,
+} from "./LanguageModel.ts";
 
 /**
  * Error raised by AI Gateway runtime operations.
@@ -40,6 +45,12 @@ export interface AiGatewayClient {
    */
   gateway: Effect.Effect<AiGateway, never, RuntimeContext>;
   /**
+   * Effect resolving to the gateway id (the resource attribute, captured at
+   * bind time). Useful when calling `ai.run(model, inputs, { gateway: { id } })`
+   * — the in-account path for first-party services like Workers AI.
+   */
+  id: Effect.Effect<string, never, RuntimeContext>;
+  /**
    * Update metadata on an existing AI Gateway log entry.
    */
   patchLog(
@@ -65,6 +76,10 @@ export interface AiGatewayClient {
     data: Parameters<AiGateway["run"]>[0],
     options?: Parameters<AiGateway["run"]>[1],
   ): Effect.Effect<Response, AiGatewayError, RuntimeContext>;
+
+  model(
+    options: LanguageModelOptions,
+  ): Layer.Layer<LanguageModel, never, RuntimeContext>;
 }
 
 /**
@@ -129,11 +144,13 @@ export const AiGatewayBindingLive = Layer.effect(
       return {
         raw: ai,
         gateway: runtimeGateway,
+        id: gatewayIdAccessor,
         patchLog: (logId, data) =>
           use((gateway) => gateway.patchLog(logId, data)),
         getLog: (logId) => use((gateway) => gateway.getLog(logId)),
         getUrl: (provider) => use((gateway) => gateway.getUrl(provider)),
         run: (data, options) => use((gateway) => gateway.run(data, options)),
+        model: (options) => makeLanguageModelLayer(options),
       } satisfies AiGatewayClient;
     });
   }),

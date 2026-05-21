@@ -414,7 +414,7 @@
     },
     "packages/alchemy": {
       "name": "alchemy",
-      "version": "2.0.0-beta.40",
+      "version": "2.0.0-beta.42",
       "bin": {
         "alchemy": "./bin/cli.js",
       },
@@ -460,6 +460,8 @@
       "devDependencies": {
         "@clack/prompts": "^0.11.0",
         "@cloudflare/workers-types": "catalog:",
+        "@effect/ai-anthropic": "4.0.0-beta.60",
+        "@effect/ai-openai": "4.0.0-beta.60",
         "@effect/platform-bun": "catalog:",
         "@effect/platform-node": "catalog:",
         "@effect/platform-node-shared": "catalog:",
@@ -503,7 +505,7 @@
     },
     "packages/better-auth": {
       "name": "@alchemy.run/better-auth",
-      "version": "2.0.0-beta.40",
+      "version": "2.0.0-beta.42",
       "dependencies": {
         "alchemy": "workspace:*",
         "better-auth": "catalog:",
@@ -512,7 +514,7 @@
     },
     "packages/pr-package": {
       "name": "@alchemy.run/pr-package",
-      "version": "2.0.0-beta.40",
+      "version": "2.0.0-beta.42",
       "dependencies": {
         "alchemy": "workspace:*",
         "effect": "catalog:",
@@ -570,6 +572,8 @@
     "@distilled.cloud/core": "^0.21.3",
     "@distilled.cloud/neon": "^0.21.3",
     "@distilled.cloud/planetscale": "^0.21.3",
+    "@effect/ai-anthropic": ">=4.0.0-beta.66 || >=4.0.0",
+    "@effect/ai-openai": ">=4.0.0-beta.66 || >=4.0.0",
     "@effect/language-service": ">=4.0.0-beta.66 || >=4.0.0",
     "@effect/platform-bun": ">=4.0.0-beta.66 || >=4.0.0",
     "@effect/platform-node": ">=4.0.0-beta.66 || >=4.0.0",
@@ -585,6 +589,8 @@
     "@types/aws-lambda": "^8.10.152",
     "@types/bun": "latest",
     "@types/node": "latest",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "@typescript/native-preview": "latest",
     "ai": "^6.0.62",
     "aws4fetch": "^1.0.20",
@@ -593,6 +599,8 @@
     "drizzle-orm": ">=1.0.0-rc.1",
     "effect": ">=4.0.0-beta.66 || >=4.0.0",
     "fast-xml-parser": "^5.3.4",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
     "rolldown": "1.0.0-rc.17",
     "solid-js": "latest",
     "sonda": "^0.11.1",
@@ -868,6 +876,10 @@
     "@ec-ts/twoslash-vue": ["@ec-ts/twoslash-vue@1.0.0", "", { "dependencies": { "@ec-ts/twoslash": "^1.0.0", "@vue/language-core": "^3.2.5", "twoslash-protocol": "^0.3.6" }, "peerDependencies": { "typescript": "^5.5.0" } }, "sha512-3bB0/1DPPLHjS0eok2Cne7xQjCQVU5AWScEBGYTqsKuTCTukDUMxUiYI54rDPQME3OLnpysiORi0FQKLA96pAg=="],
 
     "@ec-ts/vfs": ["@ec-ts/vfs@1.0.0", "", { "peerDependencies": { "typescript": "^5.5.0" } }, "sha512-GQYRPMp58p9ak+TOwSLB/HZ+iknFyTRjqMTdXDkitNN3h5yjHuO+yeeO+/cuXiv7dyXGLYs4HaYrFgRKImp8yg=="],
+
+    "@effect/ai-anthropic": ["@effect/ai-anthropic@4.0.0-beta.60", "", { "peerDependencies": { "effect": "^4.0.0-beta.60" } }, "sha512-4gwCvqK3JOPoDaya8zar8QIZ9A8+t7yxne4vfoIELLXPZ8YNPhS4LUoYmRNrhBzATmwUNK0dd28hDAYSyqLTKQ=="],
+
+    "@effect/ai-openai": ["@effect/ai-openai@4.0.0-beta.60", "", { "peerDependencies": { "effect": "^4.0.0-beta.60" } }, "sha512-P5Vjieq/6fLPCymE6toFtsgrR3siJQifFU1WtWy3kKM5noGNIz00vlSgn+sDq1DTlB11N8XZXiokvawTKPlS5Q=="],
 
     "@effect/language-service": ["@effect/language-service@0.77.0", "", { "bin": { "effect-language-service": "cli.js" } }, "sha512-QP2bri8DdcK7Eo+SqFS2yNeD0Ch9kKHYxq2jeE9CaPpBknevCNFb3+hT6qSsPt2P6yOkhNP83KMy5Uk7DGBXlg=="],
 
@@ -3988,6 +4000,8 @@
     "@vue/language-core/@vue/compiler-dom": ["@vue/compiler-dom@3.5.34", "", { "dependencies": { "@vue/compiler-core": "3.5.34", "@vue/shared": "3.5.34" } }, "sha512-EbF/T++k0e2MMZlJsBhzK8Sgwt0HcIPOhzn1CTB/lv6sQcyk+OWf8YeiLxZp3ro7MbbLcAfAJ6sEvjFWuNgUCw=="],
 
     "@vue/language-core/@vue/shared": ["@vue/shared@3.5.34", "", {}, "sha512-24uqU4OIiX29ryC3MeWid/Xf2fa2EFRUVLb77nRhk+UrTVrh/XiGtFAFmJBAtBRbjwNdsPRP+jj/OL27Eg1NDA=="],
+
+    "alchemy/@types/node": ["@types/node@25.9.1", "", { "dependencies": { "undici-types": ">=7.24.0 <7.24.7" } }, "sha512-xfrlY7UD5rMJk3ZVJP8BNzS28J36YJg+xp+LPXV1TdWxr8uMH5A860QNxYDGQe/ylDSgjxE52Q9VnO7p75tJxg=="],
 
     "ansi-align/string-width": ["string-width@4.2.3", "", { "dependencies": { "emoji-regex": "^8.0.0", "is-fullwidth-code-point": "^3.0.0", "strip-ansi": "^6.0.1" } }, "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g=="],
 
