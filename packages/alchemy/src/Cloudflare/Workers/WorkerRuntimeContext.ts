@@ -9,6 +9,7 @@ import type * as Serverless from "../../Serverless/index.ts";
 import { makeRequestHandler } from "./HttpServer.ts";
 import {
   ExportedHandlerMethods,
+  isWorkerEvent,
   WorkerEnvironment,
   WorkerTypeId,
   type WorkerEvent,
@@ -93,11 +94,27 @@ export const makeWorkerRuntimeContext = (id: string): WorkerRuntimeContext => {
       handler: HttpEffect<Req> | Effect.Effect<HttpEffect<Req>>,
       options?: { shape?: Record<string, unknown> },
     ) => {
-      // Capture the user's full default-export shape so `exports` can
-      // expose any non-handler methods on it as RPC methods on the
-      // deployed `WorkerEntrypoint` subclass — see `__rpc__` below.
       if (options?.shape) userShape = options.shape;
-      return ctx.listen(makeRequestHandler(handler));
+      const registerFetch = ctx.listen(makeRequestHandler(handler));
+
+      const nonFetchMethods = ExportedHandlerMethods.filter(
+        (m) => m !== "fetch" && options?.shape?.[m] != null,
+      );
+      if (nonFetchMethods.length === 0) return registerFetch;
+
+      return Effect.all(
+        [
+          registerFetch,
+          ...nonFetchMethods.map((method) =>
+            ctx.listen((event: any) => {
+              if (!isWorkerEvent(event) || event.type !== method) return;
+              const handler = (options!.shape as any)[method];
+              return (handler as Function)(event.input) as Effect.Effect<any>;
+            }),
+          ),
+        ],
+        { discard: true },
+      );
     },
     listen: ((
       handler:
