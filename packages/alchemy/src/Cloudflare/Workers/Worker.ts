@@ -138,6 +138,8 @@ export const ExportedHandlerMethods = [
   "queue",
 ] as const satisfies (keyof cf.ExportedHandler)[];
 
+export type ExportedHandlerMethod = (typeof ExportedHandlerMethods)[number];
+
 export type WorkerServices =
   | Worker
   | Request

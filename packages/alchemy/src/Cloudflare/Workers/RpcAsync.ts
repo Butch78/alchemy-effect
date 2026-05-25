@@ -2,9 +2,17 @@ import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
 import type { Rpc } from "../../Rpc.ts";
 import { isRpcErrorEnvelope, isRpcStreamEnvelope } from "../Bridge.ts";
+import {
+  ExportedHandlerMethods,
+  type ExportedHandlerMethod,
+} from "./Worker.ts";
+
+const handlerMethodSet = new Set<string>(ExportedHandlerMethods);
 
 export type RpcAsync<Shape> = {
-  [K in keyof Shape as K extends "fetch" ? never : K]: Shape[K] extends (
+  [K in keyof Shape as K extends ExportedHandlerMethod
+    ? never
+    : K]: Shape[K] extends (
     ...args: infer A
   ) => Effect.Effect<infer T, any, any>
     ? (...args: A) => Promise<T>
@@ -79,7 +87,11 @@ export const toRpcAsync = <W>(stub: any): RpcAsync<Rpc.Shape<W>> & Service =>
     get: (target, prop) => {
       // `Service` methods (fetch/connect) and any non-string keys (Symbol.dispose, etc.)
       // pass through to the underlying Cloudflare binding unchanged.
-      if (typeof prop !== "string" || prop === "fetch" || prop === "connect") {
+      if (
+        typeof prop !== "string" ||
+        prop === "connect" ||
+        handlerMethodSet.has(prop)
+      ) {
         const value = (target as any)[prop];
         return typeof value === "function" ? value.bind(target) : value;
       }

@@ -16,7 +16,12 @@ import type { R2Bucket } from "../R2/R2Bucket.ts";
 import type { Assets } from "./Assets.ts";
 import type { DurableObjectNamespaceLike } from "./DurableObjectNamespace.ts";
 import { makeRpcStub } from "./Rpc.ts";
-import { isWorker, Worker, WorkerEnvironment } from "./Worker.ts";
+import {
+  isWorker,
+  Worker,
+  WorkerEnvironment,
+  type ExportedHandlerMethod,
+} from "./Worker.ts";
 
 export type WorkerBinding = Exclude<
   workers.PutScriptRequest["metadata"]["bindings"],
@@ -74,7 +79,7 @@ export const bindWorker = Effect.fnUntraced(function* <Shape, Req = never>(
   const stubEff = WorkerEnvironment.pipe(
     Effect.map((env) => (env as Record<string, unknown>)[worker.LogicalId]),
   );
-  return makeRpcStub<Shape>(stubEff);
+  return makeRpcStub<Omit<Shape, ExportedHandlerMethod>>(stubEff);
 });
 
 export class BindWorkerPolicy extends Binding.Policy<
