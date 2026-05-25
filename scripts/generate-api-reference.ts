@@ -46,6 +46,27 @@ interface PageDoc {
   sections: ExampleSection[];
 }
 
+interface IndexEntry {
+  cloud: string;
+  service: string | undefined;
+  resource: string;
+  href: string;
+  summary: string;
+}
+
+const cloudBlurbs: Record<string, string> = {
+  AWS: "Provision AWS infrastructure — S3, DynamoDB, Lambda, SQS, EC2, IAM, and more.",
+  Cloudflare:
+    "Provision Cloudflare Workers, R2, D1, KV, Queues, Durable Objects, and more.",
+  Neon: "Serverless Postgres branches on Neon.",
+  Planetscale: "Branched MySQL and Postgres on PlanetScale.",
+  GitHub:
+    "Manage GitHub repository state — secrets, variables, and PR comments.",
+  Axiom: "Datasets, dashboards, monitors, and notifiers on Axiom.",
+  Drizzle: "Type-safe SQL schema and migrations via Drizzle.",
+  Build: "Build steps that produce asset artifacts (e.g. shell commands).",
+};
+
 const normalizeSlashes = (value: string) => value.split(path.sep).join("/");
 
 async function discoverFiles(): Promise<FileEntry[]> {
@@ -500,6 +521,102 @@ function renderPage(doc: PageDoc): string {
   return `${frontmatter}\n\n${sourceBlock}\n`;
 }
 
+function hrefFor(entry: FileEntry): string {
+  const rel = normalizeSlashes(path.relative(config.outRoot, entry.outputPath));
+  return ("/providers/" + rel.replace(/\.md$/, "")).toLowerCase();
+}
+
+function indexEntryFor(entry: FileEntry, doc: PageDoc): IndexEntry {
+  const parts = normalizeSlashes(entry.relativePath).split("/");
+  const cloud = parts[0];
+  const service =
+    cloud !== "Cloudflare" && parts.length >= 3 ? parts[1] : undefined;
+  return {
+    cloud,
+    service,
+    resource: doc.title,
+    href: hrefFor(entry),
+    summary: firstParagraph(doc.summary),
+  };
+}
+
+function renderCloudIndex(cloud: string, entries: IndexEntry[]): string {
+  const description = `${cloud} Provider reference — all supported resources.`;
+  const blurb = cloudBlurbs[cloud];
+
+  const sorted = [...entries].sort((a, b) => {
+    const svc = (a.service ?? "").localeCompare(b.service ?? "");
+    if (svc !== 0) return svc;
+    return a.resource.localeCompare(b.resource);
+  });
+
+  const hasServices = sorted.some((e) => e.service);
+  const lines: string[] = [
+    "---",
+    `title: ${yamlString(cloud)}`,
+    `description: ${yamlString(description)}`,
+    "---",
+    "",
+  ];
+  if (blurb) {
+    lines.push(blurb, "");
+  }
+
+  const formatRow = (e: IndexEntry) =>
+    `- [${e.resource}](${e.href})${e.summary ? ` — ${e.summary}` : ""}`;
+
+  if (hasServices) {
+    const byService = new Map<string, IndexEntry[]>();
+    for (const e of sorted) {
+      const key = e.service ?? "Other";
+      const arr = byService.get(key) ?? [];
+      arr.push(e);
+      byService.set(key, arr);
+    }
+    const serviceNames = [...byService.keys()].sort((a, b) =>
+      a.localeCompare(b),
+    );
+    for (const svc of serviceNames) {
+      lines.push(`## ${svc}`, "");
+      for (const e of byService.get(svc)!) lines.push(formatRow(e));
+      lines.push("");
+    }
+  } else {
+    lines.push("## Resources", "");
+    for (const e of sorted) lines.push(formatRow(e));
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function renderRootIndex(clouds: string[]): string {
+  const lines: string[] = [
+    "---",
+    "title: Providers",
+    "description: Every cloud and service alchemy can provision today.",
+    "---",
+    "",
+    'import { CardGrid, LinkCard } from "@astrojs/starlight/components";',
+    "",
+    "A **Provider** implements the lifecycle (`reconcile`, `delete`, `diff`,",
+    "`read`) for a resource type. See [Provider concept](/concepts/provider)",
+    "for the abstraction; this page is the reference index of every Provider",
+    "alchemy ships today.",
+    "",
+    "<CardGrid>",
+  ];
+  for (const cloud of clouds) {
+    const blurb = cloudBlurbs[cloud] ?? `${cloud} provider resources.`;
+    const href = `/providers/${cloud}`.toLowerCase();
+    lines.push(
+      `  <LinkCard title=${JSON.stringify(cloud)} href=${JSON.stringify(href)} description=${JSON.stringify(blurb)} />`,
+    );
+  }
+  lines.push("</CardGrid>", "");
+  return lines.join("\n");
+}
+
 async function main() {
   const entries = await discoverFiles();
   console.log(`Discovered ${entries.length} source files.`);
@@ -527,6 +644,8 @@ async function main() {
     `Filtered to ${resourceEntries.length} documented files (excluded ${entries.length - resourceEntries.length} unannotated files).`,
   );
 
+  const indexEntries: IndexEntry[] = [];
+
   let written = 0;
   for (const entry of resourceEntries) {
     const sourceFile = project.getSourceFile(entry.absolutePath)!;
@@ -535,11 +654,36 @@ async function main() {
     await fs.mkdir(path.dirname(entry.outputPath), { recursive: true });
     await fs.writeFile(entry.outputPath, renderPage(doc), "utf8");
 
+    indexEntries.push(indexEntryFor(entry, doc));
     written++;
   }
 
+  const byCloud = new Map<string, IndexEntry[]>();
+  for (const e of indexEntries) {
+    const arr = byCloud.get(e.cloud) ?? [];
+    arr.push(e);
+    byCloud.set(e.cloud, arr);
+  }
+  const cloudNames = [...byCloud.keys()].sort((a, b) => a.localeCompare(b));
+
+  for (const cloud of cloudNames) {
+    const cloudDir = path.join(config.outRoot, cloud);
+    await fs.mkdir(cloudDir, { recursive: true });
+    await fs.writeFile(
+      path.join(cloudDir, "index.md"),
+      renderCloudIndex(cloud, byCloud.get(cloud)!),
+      "utf8",
+    );
+  }
+
+  await fs.writeFile(
+    path.join(config.outRoot, "index.mdx"),
+    renderRootIndex(cloudNames),
+    "utf8",
+  );
+
   console.log(
-    `Done. Wrote ${written} resource pages to ${normalizeSlashes(path.relative(path.join(import.meta.dir, ".."), config.outRoot))}.`,
+    `Done. Wrote ${written} resource pages + ${cloudNames.length} cloud indexes + 1 root index to ${normalizeSlashes(path.relative(path.join(import.meta.dir, ".."), config.outRoot))}.`,
   );
 }
 
