@@ -797,6 +797,13 @@ export const LiveWorkerProvider = () =>
       const normalizeCrons = (crons: string[] | undefined): string[] =>
         Array.from(new Set(crons ?? []));
 
+      const isRetryableWorkerRegistryError = (error: { _tag?: string }) =>
+        error?._tag === "WorkerNotFound" ||
+        error?._tag === "InternalServerError" ||
+        error?._tag === "ServiceUnavailable" ||
+        error?._tag === "GatewayTimeout" ||
+        error?._tag === "TooManyRequests";
+
       const getWorkerCrons = (scriptName: string) =>
         getScriptSchedule({
           accountId,
@@ -836,8 +843,7 @@ export const LiveWorkerProvider = () =>
             body: desired.map((cron) => ({ cron })),
           }).pipe(
             Effect.retry({
-              while: (error: { _tag?: string }) =>
-                error?._tag === "WorkerNotFound",
+              while: isRetryableWorkerRegistryError,
               schedule: Schedule.exponential(200).pipe(
                 Schedule.both(Schedule.recurs(15)),
               ),
@@ -977,8 +983,8 @@ export const LiveWorkerProvider = () =>
             const zoneId = yield* inferZoneIdForHostname(hostname, zoneCache);
             // Same eventual-consistency window as `setWorkerSubdomain`:
             // PUT /accounts/.../workers/domains right after `putScript`
-            // can return `WorkerNotFound` until Cloudflare's script
-            // registry has propagated. Retry on that specific tag.
+            // can fail until Cloudflare's script registry has propagated.
+            // Retry only on specific worker-registry/HTTP transient tags.
             const res = yield* putDomain({
               accountId,
               hostname,
@@ -986,8 +992,7 @@ export const LiveWorkerProvider = () =>
               zoneId,
             }).pipe(
               Effect.retry({
-                while: (error: { _tag?: string }) =>
-                  error?._tag === "WorkerNotFound",
+                while: isRetryableWorkerRegistryError,
                 schedule: Schedule.exponential(200).pipe(
                   Schedule.both(Schedule.recurs(15)),
                 ),
@@ -1630,14 +1635,11 @@ export const LiveWorkerProvider = () =>
           );
           // Cloudflare's script registry is eventually consistent — for the
           // first few hundred ms after `putScript` returns, POST /subdomain
-          // can still get back `WorkerNotFound` (a generic "unknown error"
-          // body). Bigger uploads race harder. Retry the subdomain toggle on
-          // that specific tag with a short exponential backoff; same pattern
-          // we use elsewhere in this provider for DO-namespace propagation.
+          // can still fail before the worker is visible. Retry only on
+          // specific worker-registry/HTTP transient tags.
           yield* setWorkerSubdomain(name, desiredSubdomainEnabled).pipe(
             Effect.retry({
-              while: (error: { _tag?: string }) =>
-                error?._tag === "WorkerNotFound",
+              while: isRetryableWorkerRegistryError,
               schedule: Schedule.exponential(200).pipe(
                 Schedule.both(Schedule.recurs(15)),
               ),
@@ -1900,16 +1902,12 @@ export const LiveWorkerProvider = () =>
               ],
             }).pipe(
               // Cloudflare's PUT /workers/scripts/{name} intermittently
-              // returns code 10002 / "An unknown error has occurred" on the
-              // first put for a fresh worker name. Surfaced as the shared
-              // `InternalServerError` upstream (alchemy-run/distilled#290).
-              // Also match `UnknownCloudflareError` for older
-              // @distilled.cloud/cloudflare versions that haven't picked
-              // up the patch yet.
+              // returns a generic retryable envelope on the first put for a
+              // fresh worker name. Distilled classifies those envelopes as
+              // shared retryable status errors, so avoid catching the broad
+              // `UnknownCloudflareError` fallback.
               Effect.retry({
-                while: (e: any) =>
-                  e._tag === "InternalServerError" ||
-                  e._tag === "UnknownCloudflareError",
+                while: isRetryableWorkerRegistryError,
                 schedule: Schedule.exponential(1000).pipe(
                   Schedule.both(Schedule.recurs(5)),
                 ),
