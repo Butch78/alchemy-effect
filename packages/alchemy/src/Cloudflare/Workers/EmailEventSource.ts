@@ -9,7 +9,7 @@ import { RuntimeContext } from "../../RuntimeContext.ts";
 import type { FunctionContext } from "../../Serverless/Function.ts";
 import { EmailRouting } from "../Email/EmailRouting.ts";
 import { EmailRule, type EmailMatcher } from "../Email/EmailRule.ts";
-import type { ZoneReference } from "../Zone.ts";
+import type { ZoneReference } from "../Zone/index.ts";
 import { isWorker, isWorkerEvent } from "./Worker.ts";
 
 /**
