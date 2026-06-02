@@ -142,6 +142,12 @@
       "worker": "./src/Cloudflare/Live.ts",
       "import": "./lib/Cloudflare/Live.js"
     },
+    "./Cloudflare/SQL": {
+      "types": "./lib/Cloudflare/SQL.d.ts",
+      "bun": "./src/Cloudflare/SQL.ts",
+      "worker": "./src/Cloudflare/SQL.ts",
+      "import": "./lib/Cloudflare/SQL.js"
+    },
     "./Cloudflare/*": {
       "types": "./lib/Cloudflare/*/index.d.ts",
       "bun": "./src/Cloudflare/*/index.ts",

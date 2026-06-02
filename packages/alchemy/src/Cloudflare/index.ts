@@ -13,6 +13,7 @@ export * from "./Email/index.ts";
 export * from "./Hyperdrive/index.ts";
 export * from "./Images/index.ts";
 export * from "./KV/index.ts";
+export * from "./Pipelines/index.ts";
 export * from "./Providers.ts";
 export * from "./Queue/index.ts";
 export * from "./R2/index.ts";

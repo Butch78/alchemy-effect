@@ -15,6 +15,7 @@ import { SendEmail } from "../Email/SendEmail.ts";
 import { Hyperdrive } from "../Hyperdrive/Hyperdrive.ts";
 import { Images } from "../Images/Images.ts";
 import type { KVNamespace } from "../KV/KVNamespace.ts";
+import type { Stream as PipelinesStream } from "../Pipelines/Stream.ts";
 import type { Queue } from "../Queue/Queue.ts";
 import type { R2Bucket } from "../R2/R2Bucket.ts";
 import type { RateLimit } from "../RateLimit/RateLimit.ts";
@@ -47,6 +48,7 @@ export type WorkerBindingResource =
   | R2Bucket
   | D1Database
   | KVNamespace
+  | PipelinesStream
   | Queue
   | AiGateway
   | AnalyticsEngineDataset

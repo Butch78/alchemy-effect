@@ -17,6 +17,7 @@ import { isHyperdrive } from "../Hyperdrive/Hyperdrive.ts";
 import { getHyperdriveDevOrigin } from "../Hyperdrive/HyperdriveBinding.ts";
 import { isImages } from "../Images/Images.ts";
 import { isKVNamespace } from "../KV/KVNamespace.ts";
+import { isStream as isPipelinesStream } from "../Pipelines/Stream.ts";
 import { isQueue } from "../Queue/Queue.ts";
 import { isR2Bucket } from "../R2/R2Bucket.ts";
 import { isRateLimit } from "../RateLimit/RateLimit.ts";
@@ -188,6 +189,12 @@ const toBinding = (
       type: "queue",
       name: bindingName,
       queueName: binding.queueName,
+    };
+  } else if (isPipelinesStream(binding)) {
+    return {
+      type: "pipelines",
+      name: bindingName,
+      pipeline: binding.streamId,
     };
   } else if (isAiGateway(binding)) {
     return {
