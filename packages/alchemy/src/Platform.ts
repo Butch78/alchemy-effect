@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import { pipe } from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import type { Scope } from "effect/Scope";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { SingleShotGen } from "effect/Utils";
@@ -21,6 +22,7 @@ import type { Rpc } from "./Rpc.ts";
 import {
   CurrentRuntimeContext,
   RuntimeContext,
+  sanitizeKey,
   type BaseRuntimeContext,
 } from "./RuntimeContext.ts";
 import { Self } from "./Self.ts";
@@ -65,11 +67,7 @@ export interface Platform<
   MainShape,
   RuntimeContext extends BaseRuntimeContext,
   BaseShape = {},
-> extends Effect.Effect<
-  Resource & RuntimeContext,
-  never,
-  Services | PlatformServices
-> {
+> extends Effect.Effect<Resource & RuntimeContext, never, Resource> {
   Type: Resource["Type"];
   Provider: Provider<Resource>;
 
@@ -78,7 +76,11 @@ export interface Platform<
       id: string,
       props:
         | InputProps<Resource["Props"]>
-        | Effect.Effect<InputProps<Resource["Props"]>, never, PropsReq>,
+        | Effect.Effect<
+            InputProps<Resource["Props"]>,
+            ConfigError.ConfigError,
+            PropsReq
+          >,
     ): Effect.Effect<
       Resource & Rpc<Self> & Dependencies<Deps>,
       never,
@@ -90,7 +92,7 @@ export interface Platform<
         Self,
         never,
         | Resource["Providers"]
-        | Exclude<PropsReq | InitReq, Services | PlatformServices>
+        | Exclude<PropsReq | InitReq, Services | PlatformServices | Resource>
       >;
       new (_: never): MakeShape<Shape, BaseShape>;
       of(shape: Shape & MainShape): MakeShape<Shape, BaseShape>;
@@ -100,19 +102,19 @@ export interface Platform<
     <
       Shape extends MainShape,
       PropsReq = never,
-      InitReq extends Services | PlatformServices = never,
+      InitReq extends Services | PlatformServices | Resource = never,
     >(
       id: string,
       props:
         | InputProps<Resource["Props"]>
-        | Effect.Effect<Resource["Props"], never, PropsReq>,
+        | Effect.Effect<Resource["Props"], ConfigError.ConfigError, PropsReq>,
       impl: Effect.Effect<Shape, ConfigError.ConfigError, InitReq>,
     ): Effect.Effect<
       Resource & Rpc<Self>,
       never,
       | Resource["Providers"]
       | PropsReq
-      | Exclude<InitReq, Services | PlatformServices>
+      | Exclude<InitReq, Services | PlatformServices | Resource>
     > & {
       new (_: never): MakeShape<Shape, BaseShape>;
     };
@@ -120,29 +122,33 @@ export interface Platform<
       id: string,
       props:
         | InputProps<Resource["Props"]>
-        | Effect.Effect<InputProps<Resource["Props"]>, never, PropsReq>,
+        | Effect.Effect<
+            InputProps<Resource["Props"]>,
+            ConfigError.ConfigError,
+            PropsReq
+          >,
     ): Effect.Effect<
       Resource & Rpc<Self>,
       never,
       Resource["Providers"] | PropsReq
     > & {
-      make<InitReq extends Services | PlatformServices = never>(
+      make<InitReq extends Services | PlatformServices | Resource = never>(
         impl: Effect.Effect<Shape, ConfigError.ConfigError, InitReq>,
       ): Layer.Layer<
         Self,
         never,
         | Resource["Providers"]
-        | Exclude<PropsReq | InitReq, Services | PlatformServices>
+        | Exclude<PropsReq | InitReq, Services | PlatformServices | Resource>
       >;
       new (_: never): MakeShape<Shape, BaseShape>;
-    } & (<InitReq extends Services | PlatformServices = never>(
-        impl: Effect.Effect<Shape, never, InitReq>,
+    } & (<InitReq extends Services | PlatformServices | Resource = never>(
+        impl: Effect.Effect<Shape, ConfigError.ConfigError, InitReq>,
       ) => Effect.Effect<
         Resource & Rpc<Self>,
         never,
         | Resource["Providers"]
         | PropsReq
-        | Exclude<InitReq, Services | PlatformServices>
+        | Exclude<InitReq, Services | PlatformServices | Resource>
       >);
   };
   // <PropsReq = never, InitReq extends Services | PlatformServices = never>(
@@ -364,18 +370,30 @@ export const Platform = <
                       return ConfigProvider.make(
                         Effect.fnUntraced(function* (path) {
                           const ctx = yield* CurrentRuntimeContext;
-                          const key = path.map((p) => p.toString()).join("_");
+                          // `set`/`get` store keys verbatim, so canonicalize the
+                          // logical config path here (the caller's job) before
+                          // handing it to the RuntimeContext.
+                          const key = sanitizeKey(
+                            path.map((p) => p.toString()).join("_"),
+                          );
                           const node = yield* configProvider.get(path);
                           if (phase === "plan" && node) {
                             // bind it to the RuntimeContext if running in plan phase
-                            const output = Output.literal(node.value);
+                            const output = Output.literal(
+                              Redacted.make(node.value),
+                            );
                             yield* ctx?.set(key, output) ?? Effect.void;
                             return node;
                           } else if (phase === "runtime" && ctx) {
                             // retrieve from the RuntimeContext if running in runtime phase
-                            const value = yield* ctx.get<string>(key);
+                            const value =
+                              yield* ctx.get<Redacted.Redacted<string>>(key);
                             if (value) {
-                              return ConfigProvider.makeValue(value as string);
+                              return ConfigProvider.makeValue(
+                                Redacted.isRedacted(value)
+                                  ? Redacted.value(value)
+                                  : value,
+                              );
                             }
                           }
                           // fallback to the config provider otherwise

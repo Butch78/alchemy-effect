@@ -18,24 +18,27 @@ import * as AnalyticsEngine from "./AnalyticsEngine/index.ts";
 import * as ApiToken from "./ApiToken/index.ts";
 import * as Artifacts from "./Artifacts/index.ts";
 import { CloudflareAuth } from "./Auth/AuthProvider.ts";
-import * as BrowserRendering from "./BrowserRendering/index.ts";
+import * as Browser from "./Browser/index.ts";
 import * as CloudflareEnvironment from "./CloudflareEnvironment.ts";
 import * as Containers from "./Container/index.ts";
 import * as Credentials from "./Credentials.ts";
 import * as D1 from "./D1/index.ts";
-import * as DnsRecord from "./DnsRecord.ts";
+import * as Dns from "./Dns/index.ts";
 import * as Email from "./Email/index.ts";
 import * as Hyperdrive from "./Hyperdrive/index.ts";
 import * as Images from "./Images/index.ts";
 import * as KV from "./KV/index.ts";
 import * as Queue from "./Queue/index.ts";
 import * as R2 from "./R2/index.ts";
+import * as RateLimit from "./RateLimit/index.ts";
 import * as SecretsStore from "./SecretsStore/index.ts";
 import * as Tunnel from "./Tunnel/index.ts";
+import * as Vectorize from "./Vectorize/index.ts";
 import * as VpcService from "./VpcService/index.ts";
 import * as Workers from "./Workers/index.ts";
 import * as Workflows from "./Workers/Workflow.ts";
 import * as Zaraz from "./Zaraz/index.ts";
+import * as Zone from "./Zone/index.ts";
 
 export { Credentials } from "@distilled.cloud/cloudflare/Credentials";
 
@@ -58,12 +61,15 @@ export const providers = () =>
       AiGateway.AiGatewayBindingPolicy,
       AnalyticsEngine.AnalyticsEngineDatasetBindingPolicy,
       Artifacts.ArtifactsBindingPolicy,
-      BrowserRendering.BrowserRenderingBindingPolicy,
+      Browser.BrowserBindingPolicy,
       Command,
       Containers.Container,
       D1.D1ConnectionPolicy,
       D1.D1Database,
-      DnsRecord.DnsRecord,
+      Dns.DnsRecord,
+      Dns.DnsReadPolicy,
+      Dns.DnsReadWritePolicy,
+      Dns.DnsWritePolicy,
       Email.EmailAddress,
       Email.EmailRouting,
       Email.EmailRule,
@@ -79,10 +85,17 @@ export const providers = () =>
       Queue.QueueEventSourcePolicy,
       R2.R2Bucket,
       R2.R2BucketBindingPolicy,
+      RateLimit.RateLimitBindingPolicy,
       SecretsStore.SecretBindingPolicy,
       SecretsStore.SecretsStore,
       SecretsStore.Secret,
       Tunnel.Tunnel,
+      Tunnel.TunnelReadPolicy,
+      Tunnel.TunnelReadWritePolicy,
+      Tunnel.TunnelWritePolicy,
+      Vectorize.VectorizeIndexBindingPolicy,
+      Vectorize.VectorizeIndex,
+      Vectorize.VectorizeMetadataIndex,
       VpcService.VpcService,
       KeyPair,
       Random,
@@ -92,6 +105,7 @@ export const providers = () =>
       Workers.Worker,
       Workflows.WorkflowResource,
       Zaraz.ZarazConfig,
+      Zone.Zone,
     ]),
   ).pipe(
     Layer.provide(
@@ -102,11 +116,14 @@ export const providers = () =>
         AiGateway.AiGatewayBindingPolicyLive,
         AnalyticsEngine.AnalyticsEngineDatasetBindingPolicyLive,
         Artifacts.ArtifactsBindingPolicyLive,
-        BrowserRendering.BrowserRenderingBindingPolicyLive,
+        Browser.BrowserBindingPolicyLive,
         Containers.ContainerProvider(),
         D1.D1ConnectionPolicyLive,
         D1.DatabaseProvider(),
-        DnsRecord.DnsRecordProvider(),
+        Dns.DnsRecordProvider(),
+        Dns.DnsReadPolicyLive,
+        Dns.DnsReadWritePolicyLive,
+        Dns.DnsWritePolicyLive,
         Email.EmailAddressProvider(),
         Email.EmailRoutingProvider(),
         Email.EmailRuleProvider(),
@@ -122,10 +139,17 @@ export const providers = () =>
         Queue.QueueConsumerProvider(),
         R2.R2BucketBindingPolicyLive,
         R2.R2BucketProvider(),
+        RateLimit.RateLimitBindingPolicyLive,
         SecretsStore.SecretBindingPolicyLive,
         SecretsStore.SecretsStoreProvider(),
         SecretsStore.StoreSecretProvider(),
         Tunnel.TunnelProvider(),
+        Tunnel.TunnelReadPolicyLive,
+        Tunnel.TunnelReadWritePolicyLive,
+        Tunnel.TunnelWritePolicyLive,
+        Vectorize.VectorizeIndexBindingPolicyLive,
+        Vectorize.VectorizeIndexProvider(),
+        Vectorize.VectorizeMetadataIndexProvider(),
         VpcService.VpcServiceProvider(),
         Workers.BindWorkerPolicyLive,
         Workers.CronEventSourcePolicyLive,
@@ -133,6 +157,7 @@ export const providers = () =>
         Workers.WorkerProvider(),
         Workflows.WorkflowProvider(),
         Zaraz.ZarazConfigProvider(),
+        Zone.ZoneProvider(),
       ),
     ),
     Layer.provideMerge(

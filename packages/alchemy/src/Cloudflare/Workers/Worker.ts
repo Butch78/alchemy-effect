@@ -1,6 +1,7 @@
 import type * as cf from "@cloudflare/workers-types";
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import * as zones from "@distilled.cloud/cloudflare/zones";
+import type { ConfigError } from "effect/Config";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -283,6 +284,29 @@ export interface WorkerProps<
    * options used to build this Worker. See {@link Bundle.BundleExtraOptions}.
    */
   build?: Bundle.BundleExtraOptions;
+  /**
+   * Options for the local dev server that runs this Worker under `alchemy dev`.
+   * Each Worker is served on its own port.
+   */
+  dev?: {
+    /**
+     * Host the local dev server binds to.
+     * @default "localhost"
+     */
+    host?: string;
+    /**
+     * Port the local dev server listens on. If the port is unavailable, the
+     * next free port is used unless {@link strictPort} is `true`.
+     * @default 1337
+     */
+    port?: number;
+    /**
+     * When `true`, fail instead of falling back to another port if {@link port}
+     * is already in use.
+     * @default false
+     */
+    strictPort?: boolean;
+  };
 }
 
 export type Worker<Bindings extends WorkerBindings = any> = Resource<
@@ -685,7 +709,11 @@ export const Worker: Platform<
     id: string,
     props:
       | InputProps<WorkerProps<Bindings, Assets>>
-      | Effect.Effect<InputProps<WorkerProps<Bindings, Assets>>, never, Req>,
+      | Effect.Effect<
+          InputProps<WorkerProps<Bindings, Assets>>,
+          ConfigError,
+          Req
+        >,
   ): Effect.Effect<
     Worker<{
       [binding in keyof NormalizedBindings<
