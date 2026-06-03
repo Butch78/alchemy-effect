@@ -1,22 +1,26 @@
 import * as Cloudflare from "@/Cloudflare/index.ts";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import { HttpServerRequest } from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 
-const zone = process.env.CLOUDFLARE_TEST_ZONE;
-const inboxAddress = process.env.CLOUDFLARE_TEST_EMAIL_INBOX;
-const senderAddress = process.env.CLOUDFLARE_TEST_EMAIL_FROM;
-
 /**
- * `send_email` binding the test worker uses to seed a message into the
- * inbox it also subscribes to. Restricted to the sender/destination pair
- * supplied via env so the e2e test exercises a real round-trip against
- * Cloudflare's email routing.
+ * Worker-runtime config loaded via Effect's `Config`. Captured during the
+ * Init phase below, which makes Alchemy bind them as `plain_text` on the
+ * Worker — at runtime the same `Config` calls re-resolve from those
+ * bindings via the runtime `ConfigProvider`. Falls back to `""` so the
+ * fixture is safe to import in non-email test contexts (subscribe is
+ * gated on a non-empty zone/inbox).
  */
-export const Sender = Cloudflare.SendEmail("Sender", {
-  allowedSenderAddresses: senderAddress ? [senderAddress] : undefined,
-  destinationAddress: inboxAddress,
-});
+const ZoneConfig = Config.string("CLOUDFLARE_TEST_ZONE").pipe(
+  Config.withDefault(""),
+);
+const InboxConfig = Config.string("CLOUDFLARE_TEST_EMAIL_INBOX").pipe(
+  Config.withDefault(""),
+);
+const SenderConfig = Config.string("CLOUDFLARE_TEST_EMAIL_FROM").pipe(
+  Config.withDefault(""),
+);
 
 interface ReceivedMessage {
   from: string;
@@ -78,6 +82,21 @@ export default class EmailTestWorker extends Cloudflare.Worker<EmailTestWorker>(
   },
   Effect.gen(function* () {
     const inboxes = yield* Inbox;
+
+    // Resolve the three Configs once at Init. At deploy time these come
+    // from Node's env (loaded by the Stack); Alchemy then binds the
+    // resolved values onto the Worker as plain_text so the same Config
+    // calls re-resolve from bindings at runtime.
+    const zone = yield* ZoneConfig;
+    const inboxAddress = yield* InboxConfig;
+    const senderAddress = yield* SenderConfig;
+
+    // `send_email` binding the test worker uses to seed a message into
+    // the inbox it also subscribes to.
+    const Sender = Cloudflare.SendEmail("Sender", {
+      allowedSenderAddresses: senderAddress ? [senderAddress] : undefined,
+      destinationAddress: inboxAddress || undefined,
+    });
     const sender = yield* Cloudflare.SendEmail.bind(Sender);
 
     if (zone && inboxAddress) {

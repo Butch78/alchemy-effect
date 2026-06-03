@@ -1,4 +1,5 @@
 import type * as cf from "@cloudflare/workers-types";
+import * as RemovalPolicy from "alchemy/RemovalPolicy";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -9,7 +10,7 @@ import { RuntimeContext } from "../../RuntimeContext.ts";
 import type { FunctionContext } from "../../Serverless/Function.ts";
 import { EmailRouting } from "../Email/EmailRouting.ts";
 import { EmailRule, type EmailMatcher } from "../Email/EmailRule.ts";
-import type { ZoneReference } from "../Zone/index.ts";
+import type { Zone } from "../Zone/index.ts";
 import { isWorker, isWorkerEvent } from "./Worker.ts";
 
 /**
@@ -112,7 +113,7 @@ export interface EmailSubscribeProps {
    * resources; omit if you're managing `EmailRouting` and `EmailRule`
    * yourself.
    */
-  zone?: ZoneReference;
+  zone?: Zone;
   /**
    * Matchers for the auto-created `EmailRule`. Ignored when `zone` is
    * omitted.
@@ -242,10 +243,11 @@ export const EmailEventSourcePolicyLive = EmailEventSourcePolicy.layer.succeed(
       // Bring-your-own routing: skip auto-create if zone is omitted.
       if (!props.zone) return;
 
-      yield* EmailRouting(`${host.LogicalId}EmailRouting`, {
+      yield* EmailRouting(`${props.zone.LogicalId}EmailRouting`, {
         zone: props.zone,
         enabled: true,
-      });
+      }).pipe(RemovalPolicy.retain());
+
       yield* EmailRule(`${host.LogicalId}EmailRule`, {
         zone: props.zone,
         name: props.ruleName ?? host.LogicalId,
