@@ -44,19 +44,15 @@ export default class LanguageModelTestWorker extends Cloudflare.Worker<LanguageM
   "LanguageModelTestWorker",
   {
     main: import.meta.filename,
-    subdomain: { enabled: true, previewsEnabled: false },
-    compatibility: { date: "2024-09-23", flags: ["nodejs_compat"] },
   },
   Effect.gen(function* () {
     const aiGateway = yield* Cloudflare.AiGateway.bind(Gateway);
 
     const languageModel = aiGateway.model({
-      client: aiGateway,
       model: MODEL,
       parameters: { temperature: 0.7, maxTokens: 1024 },
     });
     const toolLanguageModel = aiGateway.model({
-      client: aiGateway,
       model: TOOL_MODEL,
       parameters: { temperature: 0.2, maxTokens: 1024 },
     });

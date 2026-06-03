@@ -19,8 +19,6 @@ export default class RpcCounterWorker extends Cloudflare.Worker<RpcCounterWorker
   "RpcCounterWorker",
   {
     main: import.meta.filename,
-    subdomain: { enabled: true, previewsEnabled: false },
-    compatibility: { date: "2024-09-23", flags: ["nodejs_compat"] },
   },
   Effect.gen(function* () {
     const counters = yield* RpcCounterObject;
@@ -30,7 +28,8 @@ export default class RpcCounterWorker extends Cloudflare.Worker<RpcCounterWorker
         const request = yield* HttpServerRequest;
         const url = new URL(request.url, "http://x");
         const match = url.pathname.match(/^\/counter\/([^/]+)(?:\/(\w+))?$/);
-        if (!match) return HttpServerResponse.text("Not Found", { status: 404 });
+        if (!match)
+          return HttpServerResponse.text("Not Found", { status: 404 });
         const [, id, action] = match;
 
         if (request.method === "POST" && action === "increment") {
@@ -38,16 +37,19 @@ export default class RpcCounterWorker extends Cloudflare.Worker<RpcCounterWorker
           const result = yield* client.Increment({}).pipe(Effect.orDie);
           return yield* HttpServerResponse.json(result);
         }
+        if (request.method === "POST" && action === "reset") {
+          const client = yield* counters.getByName(id);
+          yield* client.Reset({}).pipe(Effect.orDie);
+          return HttpServerResponse.text("ok");
+        }
         if (request.method === "GET" && action === "stream") {
           const upto = Number(url.searchParams.get("upto") ?? "5");
           const body = Stream.unwrap(
             Effect.map(counters.getByName(id), (client) =>
-              client
-                .CountUpTo({ upto })
-                .pipe(
-                  Stream.map((n) => new TextEncoder().encode(`${n}\n`)),
-                  Stream.orDie,
-                ),
+              client.CountUpTo({ upto }).pipe(
+                Stream.map((n) => new TextEncoder().encode(`${n}\n`)),
+                Stream.orDie,
+              ),
             ),
           );
           return HttpServerResponse.stream(body, {

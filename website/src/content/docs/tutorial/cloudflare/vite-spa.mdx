@@ -298,7 +298,54 @@ const stack = beforeAll(deploy(Stack));
 
 ## Local dev
 
-Coming soon.
+```sh
+bun alchemy dev
+```
+
+`alchemy dev` runs the whole Stack locally with hot reloading.
+For a `Cloudflare.Vite` worker that means Alchemy boots Vite's dev
+server (HMR, instant module updates) and wires it into the same
+local proxy URL your Worker backend serves from — so the SPA and
+its API share one origin in dev, just like they do in production:
+
+```
+{
+  url: "http://localhost:1337",
+  webUrl: "http://localhost:1337",
+}
+```
+
+Edit `src/main.tsx`, save, and the browser updates without a full
+reload. Backend resources (R2 buckets, D1 databases, service
+bindings) are the **real** cloud resources — only your application
+code runs locally, so there's no emulation fidelity gap.
+
+The build-time env injection works the same in dev — `VITE_`-prefixed
+entries are inlined as `import.meta.env.<KEY>`, and `Output` values
+like `worker.url.as<string>()` resolve before the dev server starts:
+
+```typescript
+// alchemy.run.ts
+const web = yield* Cloudflare.Vite("Website", {
+  env: {
+    VITE_API_URL: worker.url.as<string>(),
+  },
+});
+```
+
+By default the dev server picks an available port. Set `dev.port`
+only if you want the local URL to stay the same across runs:
+
+```diff lang="typescript"
+// alchemy.run.ts
+ const web = yield* Cloudflare.Vite("Website", {
++  dev: { port: 3000 },
+ });
+```
+
+See [Local Development](/concepts/local-development) for the full
+model — how Workers run in `workerd`, how to attach a debugger, and
+how `dev` differs from `deploy`.
 
 ## Use a different framework
 
@@ -359,7 +406,7 @@ Add the bucket to the Vite worker's `bindings` map:
 +import { Bucket } from "./src/backend.ts";
 
  const web = yield* Cloudflare.Vite("Website", {
-+  bindings: {
++  env: {
 +    BUCKET: Bucket,
 +  },
  });
@@ -443,7 +490,7 @@ concurrency), factor it into its own Worker:
 +
 +export default class Backend extends Cloudflare.Worker<Backend>()(
 +  "Backend",
-+  { main: import.meta.path },
++  { main: import.meta.filename },
 +  Effect.gen(function* () {
 +    const bucket = yield* Cloudflare.R2Bucket.bind(Bucket);
 +
@@ -479,7 +526,7 @@ R2 itself.
 ## Bind the Backend as a service
 
 Add `Backend` next to (or instead of) `BUCKET` in the Vite worker's
-bindings:
+`env`:
 
 ```diff lang="typescript"
 // alchemy.run.ts
@@ -487,7 +534,7 @@ bindings:
 +import Backend, { Bucket } from "./src/backend.ts";
 
  const web = yield* Cloudflare.Vite("Website", {
-   bindings: {
+   env: {
      BUCKET: Bucket,
 +    BACKEND: Backend,
    },

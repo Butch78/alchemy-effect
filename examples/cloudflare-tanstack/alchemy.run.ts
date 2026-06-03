@@ -3,15 +3,15 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import Backend, { Bucket } from "./src/backend.ts";
 
-export const Website = Cloudflare.Vite("Website", {
+export class Website extends Cloudflare.Vite<Website>()("Website", {
   compatibility: {
     flags: ["nodejs_compat"],
   },
-  bindings: {
+  env: {
     BUCKET: Bucket,
     BACKEND: Backend,
   },
-});
+}) {}
 
 export type WebsiteEnv = Cloudflare.InferEnv<typeof Website>;
 

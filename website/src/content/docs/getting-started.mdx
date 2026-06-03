@@ -7,9 +7,9 @@ sidebar:
 
 import Terminal from "../../components/Terminal.astro";
 import { Code, Tabs, TabItem } from "@astrojs/starlight/components";
-import { alchemyVersion, effectVersion } from "../../versions";
+import { effectVersion } from "../../versions";
 
-export const pkgs = `"alchemy@${alchemyVersion}" "effect@${effectVersion}" "@effect/platform-bun@${effectVersion}" "@effect/platform-node@${effectVersion}"`;
+export const pkgs = `"alchemy@next" "effect@${effectVersion}" "@effect/platform-bun@${effectVersion}" "@effect/platform-node@${effectVersion}"`;
 
 ## Prerequisites
 
@@ -131,11 +131,6 @@ See [Profiles](/concepts/profiles) for the full picture.
 <a href="/tutorial/part-1" class="next-card">
   <strong>Tutorial — recommended</strong>
   <span>Adds a Worker to this Stack and covers the core concepts.</span>
-</a>
-
-<a href="/providers" class="next-card">
-  <strong>Providers reference</strong>
-  <span>Every supported Resource with copy-pasteable examples.</span>
 </a>
 
 <a href="/guides/migrating-from-v1" class="next-card">
