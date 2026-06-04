@@ -54,9 +54,10 @@ export interface DnsRecordSettings {
 
 export interface DnsRecordProps {
   /**
-   * The zone the record belongs to. Accepts a 32-char zone id, a
-   * `{ zoneId }` object (e.g. a {@link Zone} output), or a zone name that
-   * is resolved against the ambient Cloudflare account.
+   * The zone the record belongs to. Accepts a {@link Zone} resource (its
+   * `zoneId` output is resolved automatically), a 32-char zone id, a
+   * `{ zoneId }` object, or a zone name that is resolved against the ambient
+   * Cloudflare account.
    */
   zone: ZoneReference;
 
@@ -139,8 +140,9 @@ export type DnsRecord = Resource<
  * @section Creating a Record
  * @example A record
  * ```typescript
+ * const zone = yield* Cloudflare.Zone("Zone", { name: "example.com" });
  * const record = yield* Cloudflare.DnsRecord("www", {
- *   zone: { zoneId: zone.zoneId },
+ *   zone,
  *   name: "www.example.com",
  *   type: "A",
  *   content: "192.0.2.1",
@@ -162,7 +164,7 @@ export type DnsRecord = Resource<
  * @example MX record
  * ```typescript
  * const mx = yield* Cloudflare.DnsRecord("mail", {
- *   zone: { zoneId: zone.zoneId },
+ *   zone,
  *   name: "example.com",
  *   type: "MX",
  *   content: "mail.example.com",
@@ -173,7 +175,7 @@ export type DnsRecord = Resource<
  * @example TXT record
  * ```typescript
  * const txt = yield* Cloudflare.DnsRecord("spf", {
- *   zone: { zoneId: zone.zoneId },
+ *   zone,
  *   name: "example.com",
  *   type: "TXT",
  *   content: "v=spf1 include:_spf.example.com ~all",
