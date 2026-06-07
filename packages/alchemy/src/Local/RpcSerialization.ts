@@ -1,5 +1,4 @@
 import * as Cause from "effect/Cause";
-import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import { flow } from "effect/Function";
@@ -136,8 +135,8 @@ const unwrapRpcEffectHandler = <Args extends Array<any>, Success, Error>(
   handler: RpcWrappedEffectHandler<Args, Success, Error>,
 ): RpcEffectHandler<Args, Success, Error> =>
   flow(
-    (...args) => serializeRpcArgs(args) as Effect.Effect<Args>,
-    Effect.flatMap((args) => Effect.promise(() => handler(args))),
+    (...args) => serializeRpcArgs(args) as Args,
+    (args) => Effect.promise(() => handler(args)),
     Effect.flatMap((exit): Exit.Exit<Success, Error> => {
       if (exit._tag === "Success") {
         return Exit.succeed(exit.value);
@@ -163,51 +162,40 @@ const unwrapRpcStreamHandler = <Args extends Array<any>, Success, Error>(
   handler: RpcWrappedStreamHandler<Args, Success, Error>,
 ): RpcStreamHandler<Args, Success, Error> =>
   flow(
-    (...args) =>
-      Stream.fromEffect(serializeRpcArgs(args)) as Stream.Stream<Args>,
-    Stream.map((args) => handler(args)),
-    Stream.flatMap((stream) =>
+    (...args) => serializeRpcArgs(args) as Args,
+    (args) => handler(args),
+    (stream) =>
       Stream.fromReadableStream({
         evaluate: () => stream,
         onError: (error) => error as Error,
       }),
-    ),
   );
 
-const serializeRpcArgs = (
-  value: unknown,
-): Effect.Effect<unknown, Config.ConfigError> => {
-  if (Config.isConfig(value)) {
-    return value.pipe(Effect.flatMap((value) => serializeRpcArgs(value)));
-  }
+const serializeRpcArgs = (value: unknown): unknown => {
   if (Redacted.isRedacted(value)) {
-    return Effect.succeed({ _tag: "Redacted", value: Redacted.value(value) });
+    return { _tag: "Redacted", value: Redacted.value(value) };
   }
   if (Output.isOutput(value)) {
-    return Effect.succeed({
+    return {
       _tag: "Output",
       description: NodeUtil.inspect(value),
-    });
+    };
   }
   if (typeof value === "function") {
-    return Effect.succeed(null);
+    return null;
   }
   if (Array.isArray(value)) {
-    return Effect.forEach(value, serializeRpcArgs, {
-      concurrency: "unbounded",
-    });
+    return value.map(serializeRpcArgs);
   }
   if (value && typeof value === "object" && !("toJSON" in value)) {
-    return Effect.forEach(
-      Object.entries(value),
-      ([key, child]) =>
-        serializeRpcArgs(child).pipe(
-          Effect.map((serializedValue) => [key, serializedValue]),
-        ),
-      { concurrency: "unbounded" },
-    ).pipe(Effect.map(Object.fromEntries));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        serializeRpcArgs(child),
+      ]),
+    );
   }
-  return Effect.succeed(value);
+  return value;
 };
 
 const deserializeRpcArgs = (value: unknown): unknown => {
