@@ -141,9 +141,10 @@ describe("Output.evaluate", () => {
             { port: Config.number("PORT").pipe(Config.withDefault(1337)) },
             {},
           ).pipe(
-            Effect.provideService(
-              ConfigProvider.ConfigProvider,
-              ConfigProvider.fromEnv({ env: { PORT: "8080" } }),
+            Effect.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { PORT: "8080" } }),
+              ),
             ),
           );
           expect(result).toEqual({ port: 8080 });
