@@ -4,8 +4,9 @@ import {
   type RpcWrapped,
 } from "@/Local/RpcSerialization.ts";
 import * as Output from "@/Output.ts";
-import { describe, expect, it } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Redacted from "effect/Redacted";
@@ -68,6 +69,55 @@ describe("Local.RpcSerialization", () => {
         expect(
           yield* client.password({ password: Redacted.make("hush") }),
         ).toBe("hush");
+      }),
+    );
+
+    it.effect("round-trips a Config nested inside an object", () =>
+      Effect.gen(function* () {
+        const handlers = {
+          echo: (env: { c: string | Config.Config<string> }) => {
+            assert(!Config.isConfig(env.c), "Config should not be serialized");
+            return Effect.succeed(env.c);
+          },
+        };
+        const client = roundTrip(handlers);
+        expect(yield* client.echo({ c: Config.succeed("hello-config") })).toBe(
+          "hello-config",
+        );
+      }),
+    );
+
+    it.effect("round-trips a top-level Config argument", () =>
+      Effect.gen(function* () {
+        const handlers = {
+          echo: (c: string | Config.Config<string>) => {
+            assert(!Config.isConfig(c), "Config should not be serialized");
+            return Effect.succeed(c);
+          },
+        };
+        const client = roundTrip(handlers);
+        expect(yield* client.echo(Config.succeed("hush"))).toBe("hush");
+      }),
+    );
+
+    it.effect("round-trips Config.redacted", () =>
+      Effect.gen(function* () {
+        const handlers = {
+          echo: (
+            c:
+              | Redacted.Redacted<string>
+              | Config.Config<Redacted.Redacted<string>>,
+          ) => {
+            assert(!Config.isConfig(c), "Config should not be serialized");
+            return Effect.succeed(Redacted.value(c));
+          },
+        };
+        const client = roundTrip(handlers);
+        expect(
+          yield* client.echo(
+            Config.succeed(Redacted.make("config-secret-value")),
+          ),
+        ).toBe("config-secret-value");
       }),
     );
 
@@ -195,15 +245,11 @@ describe("Local.RpcSerialization", () => {
     it.effect("round-trips a stream when streamKeys is honored", () =>
       Effect.gen(function* () {
         const handlers = {
-          tail: (_n: number) => Stream.fromIterable([1, 2, 3, 4]),
+          tail: (length: number) =>
+            Stream.fromIterable(Array.from({ length }, (_, i) => i + 1)),
         };
         const client = roundTrip(handlers, ["tail"] as const);
-        const out: Array<number> = [];
-        yield* Stream.runForEach(client.tail(0), (x) =>
-          Effect.sync(() => {
-            out.push(x);
-          }),
-        );
+        const out = yield* Stream.runCollect(client.tail(4));
         expect(out).toEqual([1, 2, 3, 4]);
       }),
     );
