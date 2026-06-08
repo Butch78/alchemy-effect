@@ -97,18 +97,21 @@ export const makeTunnelPolicyLive = <Self, Id extends string>(
   sid: string,
   permissionGroups: ApiTokenPermissionGroupRef[],
 ) =>
-  Policy.layer.effect(
-    Effect.gen(function* () {
-      const { accountId } = yield* CloudflareEnvironment;
-      return (_host, token) =>
-        token.bind(sid, {
+  Policy.layer.succeed((_host, token) =>
+    CloudflareEnvironment.pipe(
+      Effect.flatMap((env) => env),
+      Effect.map((env) =>
+        env.token.bind(sid, {
           policies: [
             {
               effect: "allow",
               permissionGroups,
-              resources: { [`com.cloudflare.api.account.${accountId}`]: "*" },
+              resources: {
+                [`com.cloudflare.api.account.${accountId}`]: "*",
+              },
             },
           ],
-        });
-    }),
+        }),
+      ),
+    ),
   );

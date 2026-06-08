@@ -19,7 +19,7 @@ export interface GitHubCredentialsService {
 
 export class GitHubCredentials extends Context.Service<
   GitHubCredentials,
-  GitHubCredentialsService
+  Effect.Effect<GitHubCredentialsService>
 >()("GitHub::Credentials") {}
 
 const make = (token: Redacted.Redacted<string>): GitHubCredentialsService => ({
@@ -34,7 +34,9 @@ const make = (token: Redacted.Redacted<string>): GitHubCredentialsService => ({
 export const fromToken = (token: string | Redacted.Redacted<string>) =>
   Layer.succeed(
     GitHubCredentials,
-    make(typeof token === "string" ? Redacted.make(token) : token),
+    Effect.succeed(
+      make(typeof token === "string" ? Redacted.make(token) : token),
+    ),
   );
 
 /**
@@ -61,7 +63,7 @@ export const fromEnv = () =>
             "GitHub credentials not found. Set GITHUB_ACCESS_TOKEN or GITHUB_TOKEN.",
         });
       }
-      return make(value);
+      return Effect.succeed(make(value));
     }).pipe(Effect.orDie),
   );
 
@@ -93,6 +95,8 @@ export const fromAuthProvider = () =>
               message: `Failed to resolve GitHub credentials for profile '${profileName}': ${(e as { message?: string }).message ?? String(e)}`,
             }),
         ),
+        Effect.orDie,
+        Effect.cached,
       );
     }).pipe(Effect.orDie),
   );

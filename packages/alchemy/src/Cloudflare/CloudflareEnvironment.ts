@@ -1,4 +1,5 @@
 import * as Config from "effect/Config";
+import * as Console from "effect/Console";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,7 +14,7 @@ import {
 
 export class CloudflareEnvironment extends Context.Service<
   CloudflareEnvironment,
-  CloudflareResolvedCredentials
+  Effect.Effect<CloudflareResolvedCredentials>
 >()("Cloudflare::CloudflareEnvironment") {}
 
 const CLOUDFLARE_ACCOUNT_ID = Config.string("CLOUDFLARE_ACCOUNT_ID");
@@ -44,7 +45,13 @@ export const fromProfile = () =>
       // `loadOrConfigure` reads the persisted config under the canonical
       // provider name (`Cloudflare`); only runs `configure` (and persists the
       // result) if no stored config exists.
-      const config = yield* profile.loadOrConfigure(auth, profileName, { ci });
-      return yield* auth.read(profileName, config as CloudflareAuthConfig);
+      return yield* profile.loadOrConfigure(auth, profileName, { ci }).pipe(
+        Effect.tap(() => Console.log("FOO")),
+        Effect.flatMap((config) =>
+          auth.read(profileName, config as CloudflareAuthConfig),
+        ),
+        Effect.orDie,
+        Effect.cached,
+      );
     }),
   );

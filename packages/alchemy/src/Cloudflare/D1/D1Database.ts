@@ -1,12 +1,14 @@
 import * as d1 from "@distilled.cloud/cloudflare/d1";
 import * as Effect from "effect/Effect";
 
+import type { HttpClient } from "effect/unstable/http/HttpClient";
 import { isResolved } from "../../Diff.ts";
 import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { Resource } from "../../Resource.ts";
 import { listSqlFiles, readSqlFile } from "../../Sql/SqlFile.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import type { Credentials } from "../Credentials.ts";
 import type { Providers } from "../Providers.ts";
 import { cloneD1Database } from "./D1Clone.ts";
 import { importD1Database } from "./D1Import.ts";
@@ -250,12 +252,6 @@ export const DatabaseProvider = () =>
   Provider.effect(
     D1Database,
     Effect.gen(function* () {
-      const { accountId } = yield* CloudflareEnvironment;
-      const createDb = yield* d1.createDatabase;
-      const getDb = yield* d1.getDatabase;
-      const patchDb = yield* d1.patchDatabase;
-      const deleteDb = yield* d1.deleteDatabase;
-      const listDbs = yield* d1.listDatabases;
       // rootDir for resolving relative `importFiles` paths
       const rootDir = process.cwd();
 
@@ -267,6 +263,7 @@ export const DatabaseProvider = () =>
       return {
         stables: ["databaseId", "accountId"],
         diff: Effect.fn(function* ({ id, olds = {}, news = {}, output }) {
+          const { accountId } = yield* yield* CloudflareEnvironment;
           if (!isResolved(news)) return undefined;
           if ((output?.accountId ?? accountId) !== accountId) {
             return { action: "replace" } as const;
@@ -323,32 +320,35 @@ export const DatabaseProvider = () =>
           return undefined;
         }),
         read: Effect.fn(function* ({ id, output, olds }) {
+          const { accountId } = yield* yield* CloudflareEnvironment;
           if (output?.databaseId) {
-            return yield* getDb({
-              accountId: output.accountId,
-              databaseId: output.databaseId,
-            }).pipe(
-              Effect.map((db) => ({
-                databaseId: db.uuid ?? output.databaseId,
-                databaseName: db.name ?? output.databaseName,
-                jurisdiction: output.jurisdiction,
-                // Distilled widened generated string enums to open unions.
-                readReplication: (db.readReplication ?? undefined) as
-                  | { mode: "auto" | "disabled" }
-                  | undefined,
+            return yield* d1
+              .getDatabase({
                 accountId: output.accountId,
-                migrationsDir: output.migrationsDir,
-                migrationsTable: output.migrationsTable,
-                migrationsHashes: output.migrationsHashes,
-                importHashes: output.importHashes,
-              })),
-              Effect.catchTag("DatabaseNotFound", () =>
-                Effect.succeed(undefined),
-              ),
-            );
+                databaseId: output.databaseId,
+              })
+              .pipe(
+                Effect.map((db) => ({
+                  databaseId: db.uuid ?? output.databaseId,
+                  databaseName: db.name ?? output.databaseName,
+                  jurisdiction: output.jurisdiction,
+                  // Distilled widened generated string enums to open unions.
+                  readReplication: (db.readReplication ?? undefined) as
+                    | { mode: "auto" | "disabled" }
+                    | undefined,
+                  accountId: output.accountId,
+                  migrationsDir: output.migrationsDir,
+                  migrationsTable: output.migrationsTable,
+                  migrationsHashes: output.migrationsHashes,
+                  importHashes: output.importHashes,
+                })),
+                Effect.catchTag("DatabaseNotFound", () =>
+                  Effect.succeed(undefined),
+                ),
+              );
           }
           const name = yield* createDatabaseName(id, olds?.name);
-          const dbs = yield* listDbs({ accountId, name });
+          const dbs = yield* d1.listDatabases({ accountId, name });
           const match = dbs.result.find((db) => db.name === name);
           if (match) {
             return {
@@ -366,6 +366,7 @@ export const DatabaseProvider = () =>
           return undefined;
         }),
         reconcile: Effect.fn(function* ({ id, news = {}, output }) {
+          const { accountId } = yield* yield* CloudflareEnvironment;
           const name = yield* createDatabaseName(id, news.name);
           const jurisdiction = news.jurisdiction ?? "default";
           const acct = output?.accountId ?? accountId;
@@ -383,17 +384,19 @@ export const DatabaseProvider = () =>
               }
             | undefined;
           if (output?.databaseId) {
-            observed = yield* getDb({
-              accountId: acct,
-              databaseId: output.databaseId,
-            }).pipe(
-              Effect.catchTag("DatabaseNotFound", () =>
-                Effect.succeed(undefined),
-              ),
-            );
+            observed = yield* d1
+              .getDatabase({
+                accountId: acct,
+                databaseId: output.databaseId,
+              })
+              .pipe(
+                Effect.catchTag("DatabaseNotFound", () =>
+                  Effect.succeed(undefined),
+                ),
+              );
           }
           if (!observed) {
-            const dbs = yield* listDbs({ accountId: acct, name });
+            const dbs = yield* d1.listDatabases({ accountId: acct, name });
             observed = dbs.result.find((db) => db.name === name);
           }
 
@@ -404,26 +407,31 @@ export const DatabaseProvider = () =>
           let databaseName: string;
           const isFirstCreation = !observed;
           if (!observed) {
-            const db = yield* createDb({
-              accountId: acct,
-              name,
-              jurisdiction:
-                jurisdiction !== "default" ? jurisdiction : undefined,
-              primaryLocationHint: news.primaryLocationHint,
-            }).pipe(
-              Effect.catchTag("InvalidProperty", () =>
-                Effect.gen(function* () {
-                  const dbs = yield* listDbs({ accountId: acct, name });
-                  const match = dbs.result.find((db) => db.name === name);
-                  if (match) {
-                    return match;
-                  }
-                  return yield* Effect.die(
-                    `Database with name "${name}" already exists but could not be found`,
-                  );
-                }),
-              ),
-            );
+            const db = yield* d1
+              .createDatabase({
+                accountId: acct,
+                name,
+                jurisdiction:
+                  jurisdiction !== "default" ? jurisdiction : undefined,
+                primaryLocationHint: news.primaryLocationHint,
+              })
+              .pipe(
+                Effect.catchTag("InvalidProperty", () =>
+                  Effect.gen(function* () {
+                    const dbs = yield* d1.listDatabases({
+                      accountId: acct,
+                      name,
+                    });
+                    const match = dbs.result.find((db) => db.name === name);
+                    if (match) {
+                      return match;
+                    }
+                    return yield* Effect.die(
+                      `Database with name "${name}" already exists but could not be found`,
+                    );
+                  }),
+                ),
+              );
             databaseId = db.uuid!;
             databaseName = db.name ?? name;
           } else {
@@ -443,7 +451,7 @@ export const DatabaseProvider = () =>
               ? desiredReplicationMode !== "disabled"
               : observedReplicationMode !== desiredReplicationMode
           ) {
-            const updated = yield* patchDb({
+            const updated = yield* d1.patchDatabase({
               accountId: acct,
               databaseId,
               readReplication: { mode: desiredReplicationMode },
@@ -458,7 +466,7 @@ export const DatabaseProvider = () =>
             const sourceId = yield* resolveCloneSource(
               news.clone,
               acct,
-              listDbs,
+              d1.listDatabases,
             );
             yield* cloneD1Database({
               accountId: acct,
@@ -512,10 +520,12 @@ export const DatabaseProvider = () =>
           };
         }),
         delete: Effect.fn(function* ({ output }) {
-          yield* deleteDb({
-            accountId: output.accountId,
-            databaseId: output.databaseId,
-          }).pipe(Effect.catchTag("DatabaseNotFound", () => Effect.void));
+          yield* d1
+            .deleteDatabase({
+              accountId: output.accountId,
+              databaseId: output.databaseId,
+            })
+            .pipe(Effect.catchTag("DatabaseNotFound", () => Effect.void));
         }),
       };
     }),
@@ -531,7 +541,11 @@ const resolveCloneSource = (
   listDbs: (input: {
     accountId: string;
     name?: string;
-  }) => Effect.Effect<d1.ListDatabasesResponse, d1.ListDatabasesError, never>,
+  }) => Effect.Effect<
+    d1.ListDatabasesResponse,
+    d1.ListDatabasesError,
+    Credentials | HttpClient
+  >,
 ) =>
   Effect.gen(function* () {
     if ("databaseId" in source && source.databaseId) {
