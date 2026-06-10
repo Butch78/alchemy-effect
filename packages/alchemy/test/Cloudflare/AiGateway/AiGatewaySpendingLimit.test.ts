@@ -23,50 +23,65 @@ test.provider(
   "create, read-back, and delete the account spending limit",
   (stack) =>
     Effect.gen(function* () {
-      const { accountId } = yield* CloudflareEnvironment;
-      const getLimit = yield* aiGateway.getBillingSpendingLimit;
+      const { accountId } = yield* yield* CloudflareEnvironment;
 
       yield* stack.destroy();
 
       const cap = yield* stack.deploy(
         Effect.gen(function* () {
           return yield* Cloudflare.AiGatewaySpendingLimit("SpendCap", {
-            amount: 12_345, // cents -> $123.45
+            amount: 123_45, // cents -> $123.45
             duration: "monthly",
+            topUp: { amount: 10_00 }, // cents -> $10.00 (Cloudflare minimum)
           });
         }),
       );
 
-      expect(cap.amount).toEqual(12_345);
+      expect(cap.amount).toEqual(123_45);
       expect(cap.duration).toEqual("monthly");
       expect(cap.strategy).toEqual("fixed"); // default
       expect(cap.enabled).toEqual(true);
+      // Auto recharge defaults to on, with the default $5.00 threshold.
+      expect(cap.autoRecharge).toEqual({ amount: 10_00, threshold: 5_00 });
 
-      const live = yield* getLimit({ accountId });
+      const live = yield* aiGateway.getBillingSpendingLimit({ accountId });
       expect(live.enabled).toEqual(true);
-      expect(live.config.amount).toEqual(12_345);
+      expect(live.config.amount).toEqual(123_45);
+
+      const liveRecharge = yield* aiGateway.getBillingTopupConfig({
+        accountId,
+      });
+      expect(liveRecharge.amount).toEqual(10_00);
+      expect(liveRecharge.threshold).toEqual(5_00);
 
       yield* stack.destroy();
 
-      // After delete the account reports no active limit.
-      const afterDelete = yield* getLimit({ accountId });
+      // After delete the account reports no active limit and no
+      // auto-recharge config.
+      const afterDelete = yield* aiGateway.getBillingSpendingLimit({
+        accountId,
+      });
       expect(afterDelete.enabled).toEqual(false);
+      const rechargeAfterDelete = yield* aiGateway.getBillingTopupConfig({
+        accountId,
+      });
+      expect(rechargeAfterDelete.amount ?? 0).toEqual(0);
     }).pipe(logLevel),
 );
 
 test.provider("update the spending limit in place", (stack) =>
   Effect.gen(function* () {
-    const { accountId } = yield* CloudflareEnvironment;
-    const getLimit = yield* aiGateway.getBillingSpendingLimit;
+    const { accountId } = yield* yield* CloudflareEnvironment;
 
     yield* stack.destroy();
 
     yield* stack.deploy(
       Effect.gen(function* () {
         return yield* Cloudflare.AiGatewaySpendingLimit("SpendCap", {
-          amount: 10_000,
+          amount: 100_00, // cents -> $100.00
           duration: "weekly",
           strategy: "fixed",
+          topUp: { amount: 10_00 },
         });
       }),
     );
@@ -74,19 +89,20 @@ test.provider("update the spending limit in place", (stack) =>
     const updated = yield* stack.deploy(
       Effect.gen(function* () {
         return yield* Cloudflare.AiGatewaySpendingLimit("SpendCap", {
-          amount: 50_000,
+          amount: 500_00, // cents -> $500.00
           duration: "monthly",
           strategy: "sliding",
+          topUp: { amount: 10_00 },
         });
       }),
     );
 
-    expect(updated.amount).toEqual(50_000);
+    expect(updated.amount).toEqual(500_00);
     expect(updated.duration).toEqual("monthly");
     expect(updated.strategy).toEqual("sliding");
 
-    const live = yield* getLimit({ accountId });
-    expect(live.config.amount).toEqual(50_000);
+    const live = yield* aiGateway.getBillingSpendingLimit({ accountId });
+    expect(live.config.amount).toEqual(500_00);
     expect(live.config.duration).toEqual("monthly");
 
     yield* stack.destroy();
