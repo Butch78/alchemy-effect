@@ -28,7 +28,7 @@ import { Resource, type ResourceBinding } from "../../Resource.ts";
 import { Self } from "../../Self.ts";
 import * as Server from "../../Server/index.ts";
 import { Stack } from "../../Stack.ts";
-import { sha256Object } from "../../Util/sha256.ts";
+import { sha256, sha256Object } from "../../Util/sha256.ts";
 import { normalizeNulls } from "../../Util/stable.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
 import { CloudflareLogs, type TelemetryFilter } from "../Logs.ts";
@@ -140,6 +140,16 @@ export interface ContainerApplicationProps extends PlatformProps {
    * entrypoint. If omitted, a default base image matching the runtime is used.
    */
   dockerfile?: string;
+  /**
+   * Directory containing a complete, self-sufficient Docker build context
+   * (its own `Dockerfile` plus everything it COPYs). When set, the JS
+   * bundling pipeline is skipped entirely: no `main`, no runtime shim, no
+   * appended ENTRYPOINT. The directory is built and pushed as-is. Use this
+   * for non-JS containers (e.g. a prebuilt Rust binary). The image hash
+   * folds in every file in the directory, so content changes trigger a
+   * rebuild and rollout.
+   */
+  prebuiltContext?: string;
   /**
    * Initial number of instances to maintain.
    * @default 1
@@ -418,10 +428,38 @@ export const ContainerProvider = () =>
         id: string,
         props: ContainerApplicationProps,
       ) {
+        if (props.prebuiltContext) {
+          // Prebuilt-context mode: the caller supplies a complete Docker
+          // build context. Hash every regular file in it (sorted, so the
+          // digest is order-stable) in place of the bundle hash.
+          const { accountId } = yield* yield* CloudflareEnvironment;
+          const contextDir = props.prebuiltContext;
+          const entries = yield* fs.readDirectory(contextDir, {
+            recursive: true,
+          });
+          const fileHashes: Record<string, string> = {};
+          for (const entry of [...entries].sort()) {
+            const fullPath = `${contextDir}/${entry}`;
+            const info = yield* fs.stat(fullPath);
+            if (info.type === "File") {
+              fileHashes[entry] = yield* sha256(yield* fs.readFile(fullPath));
+            }
+          }
+          const imageHash = (yield* sha256Object({
+            files: fileHashes,
+          })).slice(0, 16);
+          const name = yield* createApplicationName(id, props.name);
+          const registryId = props.registryId ?? "registry.cloudflare.com";
+          const repositoryName = name.toLowerCase();
+          const imageRef = `${registryId}/${accountId}/${repositoryName}:${imageHash}`;
+          return { files: [], imageRef, imageHash };
+        }
         const main = props.main;
         if (!main) {
           return yield* Effect.fail(
-            new Error("Container requires a `main` entrypoint."),
+            new Error(
+              "Container requires a `main` entrypoint (or a `prebuiltContext`).",
+            ),
           );
         }
         const { accountId } = yield* yield* CloudflareEnvironment;
@@ -645,34 +683,44 @@ await Effect.runPromise(serverEffect).catch((err) => {
           yield* session.note(`Building container image ${imageRef}...`);
         }
 
-        const contextDir = yield* getStableContextDir(
-          process.cwd(),
-          dotAlchemy,
-          `${id}-container`,
-        );
-        const finalDockerfile = buildFinalDockerfile(
-          props.dockerfile,
-          runtime,
-          props.external,
-          props.autoInstallExternals,
-        );
-        yield* materializeDockerfile(finalDockerfile, contextDir);
-        yield* writeContextFiles(
-          contextDir,
-          files.map((f, i) => ({
-            // Keep the entry rename to `index.mjs` so the Dockerfile
-            // ENTRYPOINT (`ENTRYPOINT ["bun", "/app/index.mjs"]`) stays
-            // valid; preserve rolldown-assigned fileNames for every other
-            // chunk so intra-bundle relative imports resolve at runtime.
-            path: i === 0 ? "index.mjs" : f.path,
-            content: f.content,
-          })),
-        );
-        yield* dockerBuild({
-          tag: imageRef,
-          context: contextDir,
-          platform: "linux/amd64",
-        });
+        if (props.prebuiltContext) {
+          // Prebuilt-context mode: build the caller's directory verbatim,
+          // with its own Dockerfile, no bundle files, no appended ENTRYPOINT.
+          yield* dockerBuild({
+            tag: imageRef,
+            context: props.prebuiltContext,
+            platform: "linux/amd64",
+          });
+        } else {
+          const contextDir = yield* getStableContextDir(
+            process.cwd(),
+            dotAlchemy,
+            `${id}-container`,
+          );
+          const finalDockerfile = buildFinalDockerfile(
+            props.dockerfile,
+            runtime,
+            props.external,
+            props.autoInstallExternals,
+          );
+          yield* materializeDockerfile(finalDockerfile, contextDir);
+          yield* writeContextFiles(
+            contextDir,
+            files.map((f, i) => ({
+              // Keep the entry rename to `index.mjs` so the Dockerfile
+              // ENTRYPOINT (`ENTRYPOINT ["bun", "/app/index.mjs"]`) stays
+              // valid; preserve rolldown-assigned fileNames for every other
+              // chunk so intra-bundle relative imports resolve at runtime.
+              path: i === 0 ? "index.mjs" : f.path,
+              content: f.content,
+            })),
+          );
+          yield* dockerBuild({
+            tag: imageRef,
+            context: contextDir,
+            platform: "linux/amd64",
+          });
+        }
 
         yield* Effect.logInfo(
           `Cloudflare Container image: pushing ${imageRef}`,

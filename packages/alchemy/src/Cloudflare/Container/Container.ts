@@ -33,7 +33,11 @@ export class ContainerError extends Data.TaggedError("ContainerError")<{
 export interface ContainerStartupOptions extends cf.ContainerStartupOptions {}
 
 export interface ContainerProps extends ContainerApplicationProps {
-  main: string;
+  /**
+   * JS entrypoint. Required unless `prebuiltContext` supplies a complete
+   * non-JS Docker build context.
+   */
+  main?: string;
 }
 
 export type Container = {
