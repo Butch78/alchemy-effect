@@ -325,7 +325,7 @@ export type Worker<Bindings extends WorkerBindings = any> = Resource<
   },
   {
     bindings?: WorkerBinding[];
-    containers?: { className: string }[];
+    containers?: { className: string; imageName?: string }[];
     crons?: string[];
     hyperdrives?: Record<string, Required<HyperdriveDevOrigin>>;
   },

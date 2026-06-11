@@ -214,7 +214,27 @@ export const LocalWorkerProvider = () =>
             hyperdrives: worker.hyperdrives,
             durableObjectNamespaces: toRuntimeDurableObjectNamespaces(
               worker.durableObjectNamespaces,
+              worker.containerImages,
             ),
+            // Local containers: hand workerd the docker socket whenever a
+            // namespace has an attached image, mirroring `wrangler dev`.
+            // The egress-interceptor default is the image miniflare pins;
+            // ALCHEMY_CONTAINER_EGRESS_IMAGE overrides it (e.g. to work
+            // around cloudflare/workerd#6792 on hosts where TPROXY
+            // intercepts bridge-local traffic and hangs the sidecar
+            // readiness probe).
+            ...(Object.keys(worker.containerImages).length > 0
+              ? {
+                  containerEngine: {
+                    localDocker: {
+                      socketPath: "unix:///var/run/docker.sock",
+                      containerEgressInterceptorImage:
+                        process.env.ALCHEMY_CONTAINER_EGRESS_IMAGE ??
+                        "cloudflare/proxy-everything:3cb1195@sha256:0ef6716c52430096900b150d84a3302057d6cd2319dae7987128c85d0733e3c8",
+                    },
+                  },
+                }
+              : {}),
             queueConsumers: yield* getQueueConsumers(worker.name),
             modules: yield* toRuntimeModules(bundle),
             assets: toRuntimeAssets(worker.assets),
@@ -296,12 +316,26 @@ export const LocalWorkerProvider = () =>
             }
           }
         }
+        // Container-backed DO classes: map className to a local image from
+        // binding data (`containers: [{ className, imageName }]`). Only
+        // entries that carry an `imageName` participate locally; a
+        // remote-only attachment (no image) is ignored by the local
+        // runtime and `ctx.container` stays absent.
+        const containerImages: Record<string, string> = {};
+        for (const { data } of bindings) {
+          for (const container of data.containers ?? []) {
+            if (container.imageName) {
+              containerImages[container.className] = container.imageName;
+            }
+          }
+        }
         return {
           id,
           name,
           compatibility,
           workerBindings,
           durableObjectNamespaces,
+          containerImages,
           hyperdrives,
           env: props.env,
           bundleOptions: {
@@ -395,6 +429,7 @@ export const LocalWorkerProvider = () =>
               bindings: worker.workerBindings,
               durableObjectNamespaces: toRuntimeDurableObjectNamespaces(
                 worker.durableObjectNamespaces,
+                worker.containerImages,
               ),
               hyperdrives: worker.hyperdrives,
               queueConsumers: yield* getQueueConsumers(worker.name),
@@ -674,11 +709,15 @@ const toRuntimeAssets = (
 
 const toRuntimeDurableObjectNamespaces = (
   namespaces: Record<string, string>,
+  containerImages: Record<string, string> = {},
 ): RuntimeDurableObjectNamespace[] => {
   return Object.entries(namespaces).map(([className, namespaceId]) => ({
     className,
     uniqueKey: namespaceId,
     sql: true,
+    ...(containerImages[className]
+      ? { container: { imageName: containerImages[className] } }
+      : {}),
   }));
 };
 
