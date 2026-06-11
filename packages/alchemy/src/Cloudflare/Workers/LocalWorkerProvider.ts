@@ -316,19 +316,9 @@ export const LocalWorkerProvider = () =>
             }
           }
         }
-        // Container-backed DO classes: map className to a local image from
-        // binding data (`containers: [{ className, imageName }]`). Only
-        // entries that carry an `imageName` participate locally; a
-        // remote-only attachment (no image) is ignored by the local
-        // runtime and `ctx.container` stays absent.
-        const containerImages: Record<string, string> = {};
-        for (const { data } of bindings) {
-          for (const container of data.containers ?? []) {
-            if (container.imageName) {
-              containerImages[container.className] = container.imageName;
-            }
-          }
-        }
+        // Container-backed DO classes: className -> local image name from
+        // binding data (see `collectContainerImages`).
+        const containerImages = collectContainerImages(bindings);
         return {
           id,
           name,
@@ -707,7 +697,32 @@ const toRuntimeAssets = (
   };
 };
 
-const toRuntimeDurableObjectNamespaces = (
+/**
+ * Map each container-backed DO `className` to its local image name from worker
+ * binding data. Only `containers` entries that carry an `imageName` participate
+ * locally; a remote-only attachment (no image) is skipped, so `ctx.container`
+ * stays absent for it under `alchemy dev`. Later entries win on a className
+ * collision.
+ */
+export const collectContainerImages = (
+  bindings: ReadonlyArray<{
+    data: {
+      containers?: ReadonlyArray<{ className: string; imageName?: string }>;
+    };
+  }>,
+): Record<string, string> => {
+  const containerImages: Record<string, string> = {};
+  for (const { data } of bindings) {
+    for (const container of data.containers ?? []) {
+      if (container.imageName) {
+        containerImages[container.className] = container.imageName;
+      }
+    }
+  }
+  return containerImages;
+};
+
+export const toRuntimeDurableObjectNamespaces = (
   namespaces: Record<string, string>,
   containerImages: Record<string, string> = {},
 ): RuntimeDurableObjectNamespace[] => {
