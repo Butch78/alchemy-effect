@@ -1,6 +1,7 @@
 import * as Containers from "@distilled.cloud/cloudflare/containers";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import type * as rolldown from "rolldown";
 import { Unowned } from "../../AdoptPolicy.ts";
@@ -10,6 +11,7 @@ import {
   dockerBuild,
   materializeDockerfile,
   pushImage,
+  sha256File,
   writeContextFiles,
 } from "../../Bundle/Docker.ts";
 import {
@@ -28,7 +30,7 @@ import { Resource, type ResourceBinding } from "../../Resource.ts";
 import { Self } from "../../Self.ts";
 import * as Server from "../../Server/index.ts";
 import { Stack } from "../../Stack.ts";
-import { sha256, sha256Object } from "../../Util/sha256.ts";
+import { sha256Object } from "../../Util/sha256.ts";
 import { normalizeNulls } from "../../Util/stable.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
 import { CloudflareLogs, type TelemetryFilter } from "../Logs.ts";
@@ -135,21 +137,32 @@ export interface ContainerApplicationProps extends PlatformProps {
    */
   name?: string;
   /**
-   * Inline Dockerfile used as the base for building the container image.
-   * Alchemy appends statements to copy the bundled program and set the
-   * entrypoint. If omitted, a default base image matching the runtime is used.
+   * The Dockerfile to build with — either a **path** to a Dockerfile or the
+   * **inline contents** of one. Alchemy tells the two apart by resolving the
+   * string against the build context (and cwd): if it points at an existing
+   * file it is treated as a path, otherwise as inline contents.
+   *
+   * - **Bundle mode** (`main` set): the inline contents (or the file's
+   *   contents) are the base image; Alchemy appends statements to copy the
+   *   bundled program and set the entrypoint. If omitted, a default base
+   *   image matching the runtime is used.
+   * - **Context mode** (no `main`, `context` set): selects the Dockerfile to
+   *   build the context with. A path is passed to `docker build -f`; inline
+   *   contents are materialized next to the context. Defaults to
+   *   `<context>/Dockerfile`.
    */
   dockerfile?: string;
   /**
    * Directory containing a complete, self-sufficient Docker build context
-   * (its own `Dockerfile` plus everything it COPYs). When set, the JS
-   * bundling pipeline is skipped entirely: no `main`, no runtime shim, no
-   * appended ENTRYPOINT. The directory is built and pushed as-is. Use this
-   * for non-JS containers (e.g. a prebuilt Rust binary). The image hash
-   * folds in every file in the directory, so content changes trigger a
-   * rebuild and rollout.
+   * (everything the Dockerfile COPYs). When set without a `main`, the JS
+   * bundling pipeline is skipped entirely: no runtime shim, no appended
+   * ENTRYPOINT. The directory is built and pushed as-is — use it for non-JS
+   * containers (e.g. a prebuilt Rust binary). The image hash folds in every
+   * file in the directory (contents + unix mode, symlinks followed, honoring
+   * `.dockerignore` and always skipping `.git`), so content changes trigger
+   * a rebuild and rollout. Mutually exclusive with `main`.
    */
-  prebuiltContext?: string;
+  context?: string;
   /**
    * Initial number of instances to maintain.
    * @default 1
@@ -359,6 +372,73 @@ export const retryForContainerApplicationReadiness = <A, E, R>(
     }),
   );
 
+/**
+ * Translate a single `.dockerignore` pattern into a predicate over a
+ * context-relative POSIX path. Covers the common subset — `*`/`?`/`**` globs
+ * and directory prefixes (matching `foo` also excludes everything under
+ * `foo/`). It is not a full reimplementation of Docker's matcher; anything it
+ * can't model simply fails to match.
+ */
+const dockerignoreToRegExp = (pattern: string): RegExp => {
+  const body = pattern.replace(/^\/+/, "").replace(/\/+$/, "");
+  let re = "";
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "*") {
+      if (body[i + 1] === "*") {
+        re += ".*";
+        i++;
+      } else {
+        re += "[^/]*";
+      }
+    } else if (c === "?") {
+      re += "[^/]";
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  // Match the path itself or anything nested beneath it.
+  return new RegExp(`^${re}(?:/.*)?$`);
+};
+
+/**
+ * Build an ignore predicate from `.dockerignore` lines plus an always-on `.git`
+ * skip (hashing `.git` would make the digest churn on every commit). `!`
+ * negations re-include; the last matching rule wins, mirroring Docker's
+ * precedence.
+ */
+const makeContextIgnore = (dockerignore: string | undefined) => {
+  const rules: { re: RegExp; negated: boolean }[] = [
+    { re: dockerignoreToRegExp(".git"), negated: false },
+  ];
+  if (dockerignore) {
+    for (const raw of dockerignore.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line === "" || line.startsWith("#")) {
+        continue;
+      }
+      const negated = line.startsWith("!");
+      const pattern = (negated ? line.slice(1).trim() : line).replace(
+        /\/+$/,
+        "",
+      );
+      if (pattern === "") {
+        continue;
+      }
+      rules.push({ re: dockerignoreToRegExp(pattern), negated });
+    }
+  }
+  return (relPath: string): boolean => {
+    let ignored = false;
+    for (const { re, negated } of rules) {
+      if (re.test(relPath)) {
+        ignored = !negated;
+      }
+    }
+    return ignored;
+  };
+};
+
 export const ContainerProvider = () =>
   Provider.effect(
     Container,
@@ -366,6 +446,7 @@ export const ContainerProvider = () =>
       const stack = yield* Stack;
       const { dotAlchemy } = yield* AlchemyContext;
       const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const virtualEntryPlugin = yield* Bundle.virtualEntryPlugin;
 
       const telemetry = yield* CloudflareLogs;
@@ -424,50 +505,183 @@ export const ContainerProvider = () =>
           checks: props.checks,
         }) as ContainerApplication.Configuration;
 
+      /**
+       * Build context for a container image. The mode is decided once, here,
+       * so the hashing step and the build step never drift apart:
+       *
+       * - `bundle` — a JS `main` is bundled into a generated context.
+       * - `context` — a caller-supplied directory is built as-is, with its
+       *   own `Dockerfile` (path or inline contents, defaulting to
+       *   `<context>/Dockerfile`). `dockerfilePath` is what `docker build -f`
+       *   receives; `inlineDockerfile`, when set, is materialized there at
+       *   build time and folded into the image hash.
+       */
+      type ContextPlan =
+        | { readonly kind: "bundle"; readonly main: string }
+        | {
+            readonly kind: "context";
+            readonly contextDir: string;
+            readonly dockerfilePath: string;
+            readonly inlineDockerfile: string | undefined;
+          };
+
+      /**
+       * Resolve which build mode a set of props selects and where its
+       * Dockerfile lives. A `dockerfile` string is read as a path when it
+       * resolves to an existing file, otherwise as inline contents.
+       */
+      const resolveContextMode = Effect.fnUntraced(function* (
+        id: string,
+        props: ContainerApplicationProps,
+      ) {
+        if (props.main) {
+          if (props.context) {
+            return yield* Effect.fail(
+              new Error(
+                "Container: `main` and `context` are mutually exclusive — `main` bundles a JS entrypoint, `context` builds a prebuilt directory as-is.",
+              ),
+            );
+          }
+          return { kind: "bundle", main: props.main } as const;
+        }
+        if (!props.context) {
+          return yield* Effect.fail(
+            new Error(
+              "Container requires a `main` entrypoint or a `context` directory.",
+            ),
+          );
+        }
+        const contextDir = props.context;
+        if (props.dockerfile === undefined) {
+          const dockerfilePath = path.join(contextDir, "Dockerfile");
+          if (!(yield* fs.exists(dockerfilePath))) {
+            return yield* Effect.fail(
+              new Error(
+                `Container \`context\` (${contextDir}) has no Dockerfile; add one or set \`dockerfile\` to a path or inline contents.`,
+              ),
+            );
+          }
+          return {
+            kind: "context",
+            contextDir,
+            dockerfilePath,
+            inlineDockerfile: undefined,
+          } as const;
+        }
+        // A path resolves to an existing file; anything else is inline contents.
+        const candidate = path.isAbsolute(props.dockerfile)
+          ? props.dockerfile
+          : path.join(contextDir, props.dockerfile);
+        if (yield* fs.exists(candidate)) {
+          return {
+            kind: "context",
+            contextDir,
+            dockerfilePath: candidate,
+            inlineDockerfile: undefined,
+          } as const;
+        }
+        // Inline contents: stage them so `docker build -f` can find them.
+        const stageDir = yield* getStableContextDir(
+          process.cwd(),
+          dotAlchemy,
+          `${id}-context`,
+        );
+        return {
+          kind: "context",
+          contextDir,
+          dockerfilePath: path.join(stageDir, "Dockerfile"),
+          inlineDockerfile: props.dockerfile,
+        } as const;
+      });
+
+      /**
+       * Hash a prebuilt build context: every non-ignored regular file's
+       * contents (streamed, so large binaries aren't buffered whole) plus its
+       * unix mode, sorted for an order-stable digest, with the effective
+       * Dockerfile folded in. Honors `.dockerignore` and always skips `.git`.
+       * `fs.stat` follows symlinks, so links are hashed by their target.
+       */
+      const hashContext = Effect.fnUntraced(function* (
+        plan: Extract<ContextPlan, { kind: "context" }>,
+      ) {
+        const dockerignorePath = path.join(plan.contextDir, ".dockerignore");
+        const dockerignore = (yield* fs.exists(dockerignorePath))
+          ? yield* fs.readFileString(dockerignorePath)
+          : undefined;
+        const isIgnored = makeContextIgnore(dockerignore);
+
+        const entries = yield* fs.readDirectory(plan.contextDir, {
+          recursive: true,
+        });
+        const files: Record<string, { mode: number; hash: string }> = {};
+        for (const entry of [...entries].sort()) {
+          const rel = entry.split(path.sep).join("/");
+          if (isIgnored(rel)) {
+            continue;
+          }
+          const fullPath = path.join(plan.contextDir, entry);
+          const info = yield* fs.stat(fullPath);
+          if (info.type === "File") {
+            files[rel] = {
+              mode: info.mode,
+              hash: yield* sha256File(fullPath),
+            };
+          }
+        }
+        // Fold the effective Dockerfile in so changes to it — inline, or a file
+        // living outside the context — still drive the hash.
+        const dockerfile =
+          plan.inlineDockerfile ??
+          (yield* fs.readFileString(plan.dockerfilePath));
+        return yield* sha256Object({ files, dockerfile });
+      });
+
+      /**
+       * Resolve the `dockerfile` prop to Dockerfile contents. A string that
+       * resolves (against cwd) to an existing file is read as a path;
+       * otherwise it is taken as inline contents. Used in bundle mode, where
+       * the resolved contents become the base image `buildFinalDockerfile`
+       * appends to.
+       */
+      const resolveDockerfileContents = Effect.fnUntraced(function* (
+        dockerfile: string | undefined,
+      ) {
+        if (dockerfile === undefined) {
+          return undefined;
+        }
+        const candidate = path.isAbsolute(dockerfile)
+          ? dockerfile
+          : path.join(process.cwd(), dockerfile);
+        return (yield* fs.exists(candidate))
+          ? yield* fs.readFileString(candidate)
+          : dockerfile;
+      });
+
       const computeImageHash = Effect.fnUntraced(function* (
         id: string,
         props: ContainerApplicationProps,
       ) {
-        if (props.prebuiltContext) {
-          // Prebuilt-context mode: the caller supplies a complete Docker
-          // build context. Hash every regular file in it (sorted, so the
-          // digest is order-stable) in place of the bundle hash.
-          const { accountId } = yield* yield* CloudflareEnvironment;
-          const contextDir = props.prebuiltContext;
-          const entries = yield* fs.readDirectory(contextDir, {
-            recursive: true,
+        const { accountId } = yield* yield* CloudflareEnvironment;
+        const plan = yield* resolveContextMode(id, props);
+
+        const imageRefFor = (imageHash: string) =>
+          Effect.gen(function* () {
+            const name = yield* createApplicationName(id, props.name);
+            const registryId = props.registryId ?? "registry.cloudflare.com";
+            const repositoryName = name.toLowerCase();
+            return `${registryId}/${accountId}/${repositoryName}:${imageHash}`;
           });
-          const fileHashes: Record<string, string> = {};
-          for (const entry of [...entries].sort()) {
-            const fullPath = `${contextDir}/${entry}`;
-            const info = yield* fs.stat(fullPath);
-            if (info.type === "File") {
-              fileHashes[entry] = yield* sha256(yield* fs.readFile(fullPath));
-            }
-          }
-          const imageHash = (yield* sha256Object({
-            files: fileHashes,
-          })).slice(0, 16);
-          const name = yield* createApplicationName(id, props.name);
-          const registryId = props.registryId ?? "registry.cloudflare.com";
-          const repositoryName = name.toLowerCase();
-          const imageRef = `${registryId}/${accountId}/${repositoryName}:${imageHash}`;
+
+        if (plan.kind === "context") {
+          const imageHash = (yield* hashContext(plan)).slice(0, 16);
+          const imageRef = yield* imageRefFor(imageHash);
           return { files: [], imageRef, imageHash };
         }
-        const main = props.main;
-        if (!main) {
-          return yield* Effect.fail(
-            new Error(
-              "Container requires a `main` entrypoint (or a `prebuiltContext`).",
-            ),
-          );
-        }
-        const { accountId } = yield* yield* CloudflareEnvironment;
 
         const runtime = props.runtime ?? "bun";
         const { files, hash: bundleHash } = yield* bundleProgram({
           id,
-          main,
+          main: plan.main,
           runtime,
           handler: props.handler,
           isExternal: props.isExternal,
@@ -475,7 +689,7 @@ export const ContainerProvider = () =>
         });
 
         const finalDockerfile = buildFinalDockerfile(
-          props.dockerfile,
+          yield* resolveDockerfileContents(props.dockerfile),
           runtime,
           props.external,
           props.autoInstallExternals,
@@ -484,11 +698,7 @@ export const ContainerProvider = () =>
           bundleHash,
           dockerfile: finalDockerfile,
         })).slice(0, 16);
-
-        const name = yield* createApplicationName(id, props.name);
-        const registryId = props.registryId ?? "registry.cloudflare.com";
-        const repositoryName = name.toLowerCase();
-        const imageRef = `${registryId}/${accountId}/${repositoryName}:${imageHash}`;
+        const imageRef = yield* imageRefFor(imageHash);
 
         return { files, imageRef, imageHash };
       });
@@ -683,12 +893,22 @@ await Effect.runPromise(serverEffect).catch((err) => {
           yield* session.note(`Building container image ${imageRef}...`);
         }
 
-        if (props.prebuiltContext) {
-          // Prebuilt-context mode: build the caller's directory verbatim,
-          // with its own Dockerfile, no bundle files, no appended ENTRYPOINT.
+        const plan = yield* resolveContextMode(id, props);
+
+        if (plan.kind === "context") {
+          // Context mode: build the caller's directory as-is — no bundle
+          // files, no appended ENTRYPOINT. Inline Dockerfile contents are
+          // materialized next to the context so `-f` can point at them.
+          if (plan.inlineDockerfile !== undefined) {
+            yield* materializeDockerfile(
+              plan.inlineDockerfile,
+              path.dirname(plan.dockerfilePath),
+            );
+          }
           yield* dockerBuild({
             tag: imageRef,
-            context: props.prebuiltContext,
+            context: plan.contextDir,
+            dockerfile: plan.dockerfilePath,
             platform: "linux/amd64",
           });
         } else {
@@ -698,7 +918,7 @@ await Effect.runPromise(serverEffect).catch((err) => {
             `${id}-container`,
           );
           const finalDockerfile = buildFinalDockerfile(
-            props.dockerfile,
+            yield* resolveDockerfileContents(props.dockerfile),
             runtime,
             props.external,
             props.autoInstallExternals,

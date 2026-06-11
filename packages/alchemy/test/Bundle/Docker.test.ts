@@ -3,8 +3,10 @@ import {
   dockerBuild,
   materializeDockerfile,
   runDockerCommand,
+  sha256File,
   writeContextFiles,
 } from "@/Bundle/Docker";
+import { sha256 } from "@/Util/sha256";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -53,6 +55,46 @@ describe("docker context helpers", () => {
         expect(
           yield* fs.readFileString(path.join(ctx, "nested", "hello.txt")),
         ).toBe("hi");
+      } finally {
+        yield* fs
+          .remove(root, { recursive: true })
+          .pipe(Effect.catch(() => Effect.void));
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("sha256File", () => {
+  it.effect("matches the in-memory digest of the same bytes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectory({ prefix: "alchemy-sha-" });
+      try {
+        // Larger than one stream chunk, so the incremental path is exercised.
+        const body = "x".repeat(200_000);
+        const file = path.join(root, "blob.bin");
+        yield* fs.writeFileString(file, body);
+        expect(yield* sha256File(file)).toBe(yield* sha256(body));
+      } finally {
+        yield* fs
+          .remove(root, { recursive: true })
+          .pipe(Effect.catch(() => Effect.void));
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("differs when contents differ", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectory({ prefix: "alchemy-sha-" });
+      try {
+        const a = path.join(root, "a.txt");
+        const b = path.join(root, "b.txt");
+        yield* fs.writeFileString(a, "alpha");
+        yield* fs.writeFileString(b, "beta");
+        expect(yield* sha256File(a)).not.toBe(yield* sha256File(b));
       } finally {
         yield* fs
           .remove(root, { recursive: true })
@@ -168,6 +210,45 @@ describe("dockerBuild", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
     );
 
+    it.effect("builds with a custom -f Dockerfile path", () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectory({
+          prefix: "alchemy-docker-build-",
+        });
+        try {
+          const ctx = path.join(root, "ctx");
+          const tag = "alchemy-docker-test:dockerfile-path";
+          yield* writeContextFiles(ctx, [
+            { path: "marker.txt", content: "hi" },
+          ]);
+          // Dockerfile lives outside the context, named non-default.
+          const dockerfile = path.join(root, "Dockerfile.custom");
+          yield* fs.writeFileString(
+            dockerfile,
+            ["FROM alpine:3.19", "COPY marker.txt /marker.txt", ""].join("\n"),
+          );
+          yield* dockerBuild({ tag, context: ctx, dockerfile });
+          const out = yield* runDockerCommand([
+            "run",
+            "--rm",
+            tag,
+            "cat",
+            "/marker.txt",
+          ]);
+          expect(out.stdout.trim()).toBe("hi");
+          yield* runDockerCommand(["rmi", "-f", tag]).pipe(
+            Effect.catch(() => Effect.void),
+          );
+        } finally {
+          yield* fs
+            .remove(root, { recursive: true })
+            .pipe(Effect.catch(() => Effect.void));
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
     it.effect("respects multi-stage --target", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -215,6 +296,7 @@ describe("dockerBuild", () => {
   } else {
     it.skip("builds a minimal image with content Dockerfile", () => {});
     it.skip("passes --platform and --build-arg", () => {});
+    it.skip("builds with a custom -f Dockerfile path", () => {});
     it.skip("respects multi-stage --target", () => {});
   }
 });

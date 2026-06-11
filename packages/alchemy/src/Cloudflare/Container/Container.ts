@@ -34,8 +34,9 @@ export interface ContainerStartupOptions extends cf.ContainerStartupOptions {}
 
 export interface ContainerProps extends ContainerApplicationProps {
   /**
-   * JS entrypoint. Required unless `prebuiltContext` supplies a complete
-   * non-JS Docker build context.
+   * JS entrypoint. Bundled and added to the image as the entrypoint.
+   * Required unless `context` supplies a complete Docker build context to
+   * build as-is (mutually exclusive with `context`).
    */
   main?: string;
 }
@@ -136,6 +137,37 @@ export type Container = {
  *     instanceType: stack.stage === "prod" ? "standard-1" : "dev",
  *     observability: { logs: { enabled: true } },
  *   })),
+ * ) {}
+ * ```
+ *
+ * @section Prebuilt build context (non-JS images)
+ * Skip JS bundling entirely by pointing `context` at a self-contained
+ * Docker build context — its own `Dockerfile` plus everything it COPYs.
+ * The image is built and pushed as-is, so the container can run any
+ * `linux/amd64` image (a compiled Rust binary, a Go server, …). The
+ * image hash folds in every file in the directory, so content changes
+ * trigger a rebuild and rollout. `context` is mutually exclusive with
+ * `main`.
+ *
+ * @example Build a prebuilt context as-is
+ * ```typescript
+ * export class SqlCompute extends Cloudflare.Container<SqlCompute>()(
+ *   "sql-compute",
+ *   {
+ *     context: "./sql-container", // dir with its own Dockerfile
+ *     instanceType: "standard-1",
+ *   },
+ * ) {}
+ * ```
+ *
+ * @example Custom Dockerfile (path or inline contents)
+ * ```typescript
+ * export class SqlCompute extends Cloudflare.Container<SqlCompute>()(
+ *   "sql-compute",
+ *   {
+ *     context: "./sql-container",
+ *     dockerfile: "Dockerfile.prod", // path; or pass inline contents
+ *   },
  * ) {}
  * ```
  *
