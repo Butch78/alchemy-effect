@@ -1,3 +1,4 @@
+import * as Cause from "effect/Cause";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -147,7 +148,23 @@ export const execStack = Effect.fn(function* ({
             return;
           }
         }
-        const outputs = yield* apply(updatePlan);
+        // In dev, a failed apply must not drain the keep-alive below:
+        // `alchemy dev` runs under `bun --watch`, which cancels watch mode
+        // entirely on a clean exit (oven-sh/bun#10983), so completing here
+        // would tear down every healthy local resource along with the failed
+        // one. Log the full cause (the TUI renderer only shows the failure
+        // status) and keep the process alive so the rest of the stack keeps
+        // serving.
+        const outputs = dev
+          ? yield* apply(updatePlan).pipe(
+              Effect.tapCause((cause) =>
+                Console.error(
+                  `alchemy dev: apply failed; keeping dev alive so healthy resources keep serving.\n${Cause.pretty(cause)}`,
+                ),
+              ),
+              Effect.catchCause(() => Effect.succeed(undefined)),
+            )
+          : yield* apply(updatePlan);
 
         if (outputs !== undefined) {
           yield* Console.log(outputs);
