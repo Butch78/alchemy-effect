@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -51,20 +50,6 @@ export const materializeDockerfile = Effect.fn(function* (
   const target = path.join(dir, "Dockerfile");
   yield* fs.writeFileString(target, dockerfile);
   return target;
-});
-
-/**
- * SHA-256 a file by streaming it through the hasher, so a large build-context
- * input (a compiled binary, an archive) is never buffered whole in memory.
- * Returns the lowercase hex digest.
- */
-export const sha256File = Effect.fn(function* (filePath: string) {
-  const fs = yield* FileSystem.FileSystem;
-  const hash = createHash("sha256");
-  yield* fs
-    .stream(filePath)
-    .pipe(Stream.runForEach((chunk) => Effect.sync(() => hash.update(chunk))));
-  return hash.digest("hex");
 });
 
 export const writeContextFiles = Effect.fn(function* (

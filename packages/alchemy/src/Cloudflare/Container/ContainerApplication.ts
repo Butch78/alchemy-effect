@@ -11,7 +11,6 @@ import {
   dockerBuild,
   materializeDockerfile,
   pushImage,
-  sha256File,
   writeContextFiles,
 } from "../../Bundle/Docker.ts";
 import {
@@ -30,7 +29,7 @@ import { Resource, type ResourceBinding } from "../../Resource.ts";
 import { Self } from "../../Self.ts";
 import * as Server from "../../Server/index.ts";
 import { Stack } from "../../Stack.ts";
-import { sha256Object } from "../../Util/sha256.ts";
+import { sha256File, sha256Object } from "../../Util/sha256.ts";
 import { normalizeNulls } from "../../Util/stable.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
 import { CloudflareLogs, type TelemetryFilter } from "../Logs.ts";
