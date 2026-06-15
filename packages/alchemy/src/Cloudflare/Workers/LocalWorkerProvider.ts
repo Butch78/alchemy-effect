@@ -20,6 +20,7 @@ import {
   Data,
   DispatchNamespace,
   DurableObjectNamespace,
+  Flagship,
   Hyperdrive,
   Images,
   Json,
@@ -310,7 +311,7 @@ export const LocalWorkerProvider = () =>
             compatibility,
             entry: props.isExternal
               ? { kind: "external" }
-              : { kind: "effect", exports: (props.exports ?? {}) as any },
+              : { kind: "effect", exports: props.exports ?? {} },
             stack: { name: stack.name, stage: stack.stage },
             extraOptions: props.build,
           } satisfies WorkerBundleOptions,
@@ -575,6 +576,8 @@ const toRuntimeBinding = Effect.fnUntraced(function* (b: WorkerBinding) {
           b.namespaceId ??
           encodeURIComponent(`${b.scriptName!}-${b.className}`),
       });
+    case "flagship":
+      return Flagship.remote(b.name, b.appId);
     case "hyperdrive":
       return Hyperdrive.local(b.name, b.id);
     case "images":

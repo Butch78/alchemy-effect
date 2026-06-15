@@ -34,7 +34,10 @@ import {
   type AssetsProps,
 } from "./Assets.ts";
 import { getCompatibility } from "./Compatibility.ts";
-import { isDurableObjectExport } from "./DurableObjectNamespace.ts";
+import {
+  isDurableObjectExport,
+  type DurableObjectExport,
+} from "./DurableObjectNamespace.ts";
 import { LocalWorkerProvider } from "./LocalWorkerProvider.ts";
 import { Request } from "./Request.ts";
 import * as Vite from "./Vite.ts";
@@ -48,12 +51,17 @@ import type {
   WorkerBindings,
   WorkerSettingsBinding,
 } from "./WorkerBinding.ts";
-import { WorkerBundle } from "./WorkerBundle.ts";
+import {
+  readPrebuiltWorkerBundle,
+  WorkerBundle,
+  type ModuleRule,
+} from "./WorkerBundle.ts";
 import { createWorkerName } from "./WorkerName.ts";
 import {
   makeWorkerRuntimeContext,
   type WorkerRuntimeContext,
 } from "./WorkerRuntimeContext.ts";
+import type { WorkflowExport } from "./Workflow.ts";
 
 export const WorkerTypeId = "Cloudflare.Worker";
 export type WorkerTypeId = typeof WorkerTypeId;
@@ -234,7 +242,12 @@ export interface WorkerProps<
   };
   limits?: WorkerLimits;
   placement?: WorkerPlacement;
-  exports?: string[];
+  /**
+   * Tracks Durable Object and Workflow exports for Effect-native Workers only.
+   * Populated automatically from bindings; do not set manually.
+   * @internal
+   */
+  exports?: Record<string, DurableObjectExport | WorkflowExport>;
   /**
    * Environment variables and native Cloudflare Bindings to bind to
    * the Worker. Accepts:
@@ -272,6 +285,39 @@ export interface WorkerProps<
    * options used to build this Worker. See {@link Bundle.BundleExtraOptions}.
    */
   build?: Bundle.BundleExtraOptions;
+  /**
+   * Whether to bundle {@link main} with rolldown before upload.
+   *
+   * Set to `false` when `main` already points at a complete,
+   * runtime-ready ESM Worker produced by an external tool (OpenNext,
+   * a separate rolldown/esbuild pipeline, etc.). The entry and every
+   * file around it matching {@link rules} are uploaded byte-for-byte —
+   * no bundling, no minification, no transformation. Module names are
+   * the files' POSIX paths relative to the entry's directory, matching
+   * Wrangler's `no_bundle` contract.
+   *
+   * Re-bundling such artifacts is unsafe: dynamic `import()` calls the
+   * upstream tool relies on can be rewritten in ways that break runtime
+   * behavior.
+   *
+   * Durable Object and Workflow classes must be exported by the prebuilt
+   * entry itself — {@link exports} is not applied when `bundle` is
+   * `false`.
+   *
+   * @default true
+   */
+  bundle?: boolean;
+  /**
+   * Module rules selecting which files in the directory containing
+   * {@link main} are uploaded as additional modules when {@link bundle}
+   * is `false`. Each rule's globs are matched against POSIX-style paths
+   * relative to that directory, mirroring Wrangler's `rules`
+   * configuration. When provided, these rules replace
+   * {@link defaultModuleRules}.
+   *
+   * @default defaultModuleRules — ESModule (`**\/*.js`, `**\/*.mjs`), CompiledWasm (`**\/*.wasm`), Text (`**\/*.txt`, `**\/*.html`, `**\/*.sql`), Data (`**\/*.bin`)
+   */
+  rules?: ModuleRule[];
   /**
    * Options for the local dev server that runs this Worker under `alchemy dev`.
    * Each Worker is served on its own port.
@@ -514,6 +560,21 @@ export type Worker<Bindings extends WorkerBindings = any> = Resource<
  * {
  *   main: import.meta.filename,
  *   assets: "./public",
+ * }
+ * ```
+ *
+ * @example Deploying a prebuilt Worker without bundling
+ * When `main` already points at a complete, runtime-ready ESM bundle
+ * produced by an external tool (e.g. OpenNext), set `bundle: false` to
+ * upload it byte-for-byte. The entry's directory is walked recursively
+ * and every file matching the module rules (by default `.js`, `.mjs`,
+ * `.wasm`, `.txt`, `.html`, `.sql`, and `.bin`) is uploaded as an
+ * additional module named by its path relative to that directory.
+ * ```typescript
+ * {
+ *   main: "./.open-next/worker.js",
+ *   bundle: false,
+ *   assets: "./.open-next/assets",
  * }
  * ```
  *
@@ -867,8 +928,7 @@ export const LiveWorkerProvider = () =>
             })
             .pipe(
               Effect.retry({
-                while: (error: { _tag?: string }) =>
-                  error?._tag === "WorkerNotFound",
+                while: (error) => error._tag === "WorkerNotFound",
                 schedule: Schedule.exponential(200).pipe(
                   Schedule.both(Schedule.recurs(15)),
                 ),
@@ -1020,8 +1080,7 @@ export const LiveWorkerProvider = () =>
               })
               .pipe(
                 Effect.retry({
-                  while: (error: { _tag?: string }) =>
-                    error?._tag === "WorkerNotFound",
+                  while: (error) => error._tag === "WorkerNotFound",
                   schedule: Schedule.exponential(200).pipe(
                     Schedule.both(Schedule.recurs(15)),
                   ),
@@ -1144,23 +1203,27 @@ export const LiveWorkerProvider = () =>
       });
 
       const prepareBundle = (id: string, props: WorkerProps) =>
-        bundler
-          .build({
-            id,
-            main: props.main!,
-            compatibility: getCompatibility(props),
-            entry: props.isExternal
-              ? {
-                  kind: "external",
-                }
-              : {
-                  kind: "effect",
-                  exports: (props.exports ?? {}) as any,
-                },
-            stack: { name: stack.name, stage: stack.stage },
-            extraOptions: props.build,
-          })
-          .pipe(Artifacts.cached("build"));
+        (props.bundle === false
+          ? readPrebuiltWorkerBundle({
+              main: props.main!,
+              rules: props.rules,
+            })
+          : bundler.build({
+              id,
+              main: props.main!,
+              compatibility: getCompatibility(props),
+              entry: props.isExternal
+                ? {
+                    kind: "external",
+                  }
+                : {
+                    kind: "effect",
+                    exports: props.exports ?? {},
+                  },
+              stack: { name: stack.name, stage: stack.stage },
+              extraOptions: props.build,
+            })
+        ).pipe(Artifacts.cached("build"));
 
       const hashScript = (script: string) =>
         Effect.sync(() =>
@@ -1701,10 +1764,10 @@ export const LiveWorkerProvider = () =>
           // provider for DO-namespace propagation and for `putScript` itself.
           yield* setWorkerSubdomain(name, desiredSubdomainEnabled).pipe(
             Effect.retry({
-              while: (error: { _tag?: string }) =>
-                error?._tag === "WorkerNotFound" ||
-                error?._tag === "InternalServerError" ||
-                error?._tag === "UnknownCloudflareError",
+              while: (error) =>
+                error._tag === "WorkerNotFound" ||
+                error._tag === "InternalServerError" ||
+                error._tag === "UnknownCloudflareError",
               schedule: Schedule.exponential(200).pipe(
                 Schedule.both(Schedule.recurs(15)),
               ),
@@ -1869,7 +1932,7 @@ export const LiveWorkerProvider = () =>
         precreate: Effect.fnUntraced(function* ({ id, news, session }) {
           const { accountId } = yield* yield* CloudflareEnvironment;
           const name = yield* createWorkerName(id, news.name);
-          const exportMap = (news.exports ?? {}) as Record<string, unknown>;
+          const exportMap = news.exports ?? {};
           const durableObjects = Object.keys(exportMap)
             .filter((logicalId) => isDurableObjectExport(exportMap[logicalId]))
             .map((logicalId) => ({
