@@ -26,7 +26,7 @@ import { getCompatibility } from "./Compatibility.ts";
 import { isDurableObjectExport } from "./DurableObject.ts";
 import { LocalWorkerProvider } from "./LocalWorkerProvider.ts";
 import { Worker, type WorkerProps } from "./Worker.ts";
-import { getCronBindings } from "./WorkerAsyncBindings.ts";
+import { getCacheBinding, getCronBindings } from "./WorkerAsyncBindings.ts";
 import type { WorkerBinding, WorkerSettingsBinding } from "./WorkerBinding.ts";
 import { readPrebuiltWorkerBundle, WorkerBundle } from "./WorkerBundle.ts";
 import { isWorkerLoader } from "./WorkerLoader.ts";
@@ -262,8 +262,8 @@ const resolveMetadataHashValue = (
 /**
  * The deploy-time metadata surface of a Worker whose changes must trigger an
  * update but that never touch the bundle/vite/asset-content hashes:
- * compatibility, env literals, bindings, asset routing config, limits,
- * logpush, observability, placement, subdomain, and tags. See #745.
+ * compatibility, env literals, bindings, asset routing config, cache,
+ * limits, logpush, observability, placement, subdomain, and tags. See #745.
  */
 interface WorkerMetadataHashInput {
   readonly props: WorkerProps;
@@ -311,6 +311,7 @@ const resolveWorkerMetadataHash = ({
       data: binding.data,
     })),
     assets: workerAssetConfigForHash(props.assets),
+    cache: props.cache,
     limits: props.limits,
     logpush: props.logpush,
     observability: props.observability,
@@ -1241,6 +1242,7 @@ export const LiveWorkerProvider = () =>
           assets: metadataAssets,
           bindings: metadataBindings,
           bodyPart: undefined,
+          cache: news.cache ?? getCacheBinding(bindings),
           compatibilityDate: compatibility.date,
           compatibilityFlags: compatibility.flags,
           containers:
