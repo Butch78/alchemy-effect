@@ -1099,6 +1099,7 @@ export const LiveWorkerProvider = () =>
             },
           },
           placement: news.placement,
+          cache: news.cache,
           tags: metadataTags,
           tailConsumers: undefined,
           usageModel: undefined,

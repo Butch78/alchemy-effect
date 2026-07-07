@@ -108,6 +108,11 @@ export type WorkerPlacement = Exclude<
   undefined
 >;
 
+export type WorkerCache = Exclude<
+  workers.PutScriptRequest["metadata"]["cache"],
+  undefined
+>;
+
 export const ExportedHandlerMethods = [
   "fetch",
   "tail",
@@ -246,6 +251,18 @@ export interface WorkerProps<
   };
   limits?: WorkerLimits;
   placement?: WorkerPlacement;
+  /**
+   * Cloudflare Workers Cache settings. Runs the Worker behind a regional
+   * tiered cache so cacheable responses are served without invoking the
+   * Worker. `enabled` turns the feature on; `crossVersionCache` keeps cache
+   * entries valid across Worker versions.
+   *
+   * Requires responses to set `Cache-Control` (and optionally `Cache-Tag`)
+   * headers to be cacheable. Off unless set.
+   *
+   * @see https://developers.cloudflare.com/workers/cache/
+   */
+  cache?: WorkerCache;
   /**
    * Tracks Durable Object and Workflow exports for Effect-native Workers only.
    * Populated automatically from bindings; do not set manually.
