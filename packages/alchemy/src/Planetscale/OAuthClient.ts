@@ -2,12 +2,7 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import crypto from "node:crypto";
 import http from "node:http";
-import { AUTH_ERROR_URL, AUTH_SUCCESS_URL } from "../../Auth/AuthProvider.ts";
-import {
-  OAUTH_CLIENT_ID,
-  OAUTH_ENDPOINTS,
-  OAUTH_REDIRECT_URI,
-} from "./AuthProvider.ts";
+import { AUTH_ERROR_URL, AUTH_SUCCESS_URL } from "../Auth/AuthProvider.ts";
 
 export class OAuthError extends Data.TaggedError("OAuthError")<{
   error: string;
@@ -25,23 +20,41 @@ export interface OAuthCredentials {
 export interface Authorization {
   url: string;
   state: string;
-  verifier: string;
 }
+
+/**
+ * Registered PlanetScale OAuth application credentials.
+ *
+ * Unlike Cloudflare, PlanetScale OAuth has **no PKCE flow** — exchanging the
+ * authorization code (and refreshing the token) requires the application's
+ * `client_secret`. There is no way to keep that secret out of a distributed
+ * CLI, so it ships here: the exposure is the same posture as a public
+ * `client_id` (a stolen refresh token is usable, exactly like Cloudflare's
+ * secret-less refresh), and it can be rotated by cutting a new release.
+ *
+ * Registered at https://app.planetscale.com with redirect URI
+ * {@link OAUTH_REDIRECT_URI}. Scopes are configured on the application
+ * itself, not requested per-authorization. Rotate by registering a new
+ * secret and cutting a release.
+ */
+export const OAUTH_CLIENT_ID = "pscale_app_aa12e3938baebb788aac443f66e422da";
+export const OAUTH_CLIENT_SECRET =
+  "pscale_app_secret_yyZ3Q8oe99GP9_yA5wrA5er6RuN6Lz9dC66Bj1OJzpg";
+
+export const OAUTH_REDIRECT_URI = "http://localhost:9976/auth/callback";
+export const OAUTH_ENDPOINTS = {
+  // PlanetScale's own .well-known OAuth discovery doc declares this as
+  // the authorization_endpoint — NOT auth.planetscale.com/oauth/authorize
+  // (which their public docs cite). The auth.planetscale.com alias does
+  // render a consent screen but emits codes whose resulting tokens lack
+  // a `sub` claim, so the resource API at api.planetscale.com rejects
+  // them as invalid. Use the canonical endpoint.
+  authorize: "https://app.planetscale.com/oauth/authorize",
+  token: "https://auth.planetscale.com/oauth/token",
+};
 
 function generateState(length = 32): string {
   return crypto.randomBytes(length).toString("base64url");
-}
-
-function generatePKCE(length = 96): {
-  verifier: string;
-  challenge: string;
-} {
-  const verifier = crypto.randomBytes(length).toString("base64url");
-  const challenge = crypto
-    .createHash("sha256")
-    .update(verifier)
-    .digest("base64url");
-  return { verifier, challenge };
 }
 
 function extractCredentials(json: {
@@ -55,23 +68,30 @@ function extractCredentials(json: {
     access: json.access_token,
     refresh: json.refresh_token,
     expires: Date.now() + json.expires_in * 1000,
-    scopes: json.scope.split(" "),
+    scopes: json.scope ? json.scope.split(" ") : [],
   };
 }
 
 const tokenRequest = (
-  body: Record<string, string>,
+  params: Record<string, string>,
 ): Effect.Effect<OAuthCredentials, OAuthError> =>
   Effect.gen(function* () {
+    // PlanetScale's docs show the token endpoint with all parameters in
+    // the query string (https://planetscale.com/docs/api/reference/oauth).
+    // Their .well-known discovery doc advertises client_secret_basic /
+    // client_secret_post instead, but both behave identically to the
+    // query-string form in practice, so we follow the public docs
+    // literally.
+    const url = new URL(OAUTH_ENDPOINTS.token);
+    for (const [k, v] of Object.entries(params)) {
+      url.searchParams.set(k, v);
+    }
+
     const res = yield* Effect.tryPromise({
       try: () =>
-        fetch(OAUTH_ENDPOINTS.token, {
+        fetch(url.toString(), {
           method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams(body).toString(),
+          headers: { Accept: "application/json" },
         }),
       catch: (err) =>
         new OAuthError({
@@ -114,20 +134,20 @@ const tokenRequest = (
   });
 
 /**
- * Generate an authorization URL with PKCE for the given scopes.
+ * Generate a PlanetScale authorization URL.
+ *
+ * No `scope` parameter is sent: PlanetScale scopes are configured on the
+ * OAuth application itself, not requested per-authorization, so the
+ * consent screen shows whatever the app is registered with.
  */
-export function authorize(scopes: string[]): Authorization {
+export function authorize(): Authorization {
   const state = generateState();
-  const pkce = generatePKCE();
   const url = new URL(OAUTH_ENDPOINTS.authorize);
   url.searchParams.set("client_id", OAUTH_CLIENT_ID);
   url.searchParams.set("redirect_uri", OAUTH_REDIRECT_URI);
   url.searchParams.set("response_type", "code");
-  url.searchParams.set("scope", scopes.join(" "));
   url.searchParams.set("state", state);
-  url.searchParams.set("code_challenge", pkce.challenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  return { url: url.toString(), state, verifier: pkce.verifier };
+  return { url: url.toString(), state };
 }
 
 /**
@@ -135,13 +155,12 @@ export function authorize(scopes: string[]): Authorization {
  */
 export const exchange = (
   code: string,
-  verifier: string,
 ): Effect.Effect<OAuthCredentials, OAuthError> =>
   tokenRequest({
     grant_type: "authorization_code",
     code,
-    code_verifier: verifier,
     client_id: OAUTH_CLIENT_ID,
+    client_secret: OAUTH_CLIENT_SECRET,
     redirect_uri: OAUTH_REDIRECT_URI,
   });
 
@@ -155,36 +174,7 @@ export const refresh = (
     grant_type: "refresh_token",
     refresh_token: credentials.refresh,
     client_id: OAUTH_CLIENT_ID,
-    redirect_uri: OAUTH_REDIRECT_URI,
-  });
-
-/**
- * Revoke OAuth credentials.
- */
-export const revoke = (
-  credentials: OAuthCredentials,
-): Effect.Effect<void, OAuthError> =>
-  Effect.gen(function* () {
-    yield* Effect.tryPromise({
-      try: () =>
-        fetch(OAUTH_ENDPOINTS.revoke, {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams({
-            refresh_token: credentials.refresh,
-            client_id: OAUTH_CLIENT_ID,
-            redirect_uri: OAUTH_REDIRECT_URI,
-          }).toString(),
-        }),
-      catch: (err) =>
-        new OAuthError({
-          error: "network_error",
-          errorDescription: `Revoke request failed: ${err}`,
-        }),
-    });
+    client_secret: OAUTH_CLIENT_SECRET,
   });
 
 /**
@@ -266,9 +256,7 @@ function callbackPromise(
       }
 
       try {
-        const credentials = await Effect.runPromise(
-          exchange(code, authorization.verifier),
-        );
+        const credentials = await Effect.runPromise(exchange(code));
         res.writeHead(302, { Location: AUTH_SUCCESS_URL });
         res.end();
         cleanup();
