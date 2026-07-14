@@ -476,10 +476,16 @@ test.provider(
       const { accountId } = yield* yield* CloudflareEnvironment;
 
       // Phase 1: provision a worker + `Counter` DO class straight through the
-      // Cloudflare API — no Alchemy involvement, so none of our tags.
-      const physicalName = `alchemy-test-do-adopt-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
+      // Cloudflare API — no Alchemy involvement, so none of our tags. The
+      // name is deterministic (never Date.now()/random); a crashed run can
+      // leave the worker behind, and `putScript` would then reject the
+      // `newSqliteClasses` migration ("class already exists"), so purge any
+      // leftover first.
+      const physicalName = "alchemy-test-do-adopt";
+
+      yield* workers
+        .deleteScript({ accountId, scriptName: physicalName, force: true })
+        .pipe(Effect.catchTag("WorkerNotFound", () => Effect.void));
 
       yield* workers.putScript({
         accountId,

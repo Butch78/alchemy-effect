@@ -49,7 +49,6 @@
     "publish:npm": "bun run build && bun run --filter alchemy publish:npm",
     "setup": "effect-tsgo patch && bun run download:external",
     "sync:submodules": "git submodule sync --recursive && git submodule update --init --recursive",
-    "test:canary": "SMOKE_CANARY=1 bun test --only-failures ./test/smoke.test.ts",
     "test:cross-version": "bun run test/cross-version-test/run.ts",
     "test:examples": "bun scripts/test-examples.ts",
     "test": "cd ./packages/alchemy && bun vitest run",
