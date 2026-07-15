@@ -11,6 +11,7 @@ import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { isResourceOfType, Resource } from "../../Resource.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { QueuesPricing } from "../CloudflarePricing.ts";
 import {
   generateLocalId,
   isLiveId,
@@ -109,6 +110,7 @@ export const Queue = Resource<Queue>("Cloudflare.Queues.Queue", {
 
 export const ProviderLive = () =>
   Provider.succeed(Queue, {
+    pricing: QueuesPricing,
     // The `queueId` is not marked as stable because if you start in dev mode, the ID will change on first deploy.
     stables: ["accountId"],
     diff: Effect.fn(function* ({ id, olds = {}, news = {}, output }) {

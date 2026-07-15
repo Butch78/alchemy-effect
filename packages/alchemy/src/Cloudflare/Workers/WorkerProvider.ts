@@ -21,6 +21,7 @@ import { type ResourceBinding } from "../../Resource.ts";
 import { Stack } from "../../Stack.ts";
 import { sha256Object } from "../../Util/sha256.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { WorkersPricing } from "../CloudflarePricing.ts";
 import { CloudflareLogs } from "../Logs.ts";
 import { listAllZones, resolveZoneId } from "../Zone/lookup.ts";
 import { readAssets, uploadAssets } from "./Assets.ts";
@@ -2067,6 +2068,7 @@ export const LiveWorkerProvider = () =>
       });
 
       return Worker.Provider.of({
+        pricing: WorkersPricing,
         stables: ["workerId", "workerName"],
         list: () =>
           Effect.gen(function* () {

@@ -10,6 +10,7 @@ import { isResourceOfType, Resource } from "../../Resource.ts";
 import { listSqlFiles, readSqlFile } from "../../Sql/SqlFile.ts";
 import { recordsEqual } from "../../Util/equal.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { D1Pricing } from "../CloudflarePricing.ts";
 import type { Credentials } from "../Credentials.ts";
 import type { Providers } from "../Providers.ts";
 import { applyMigrations } from "./ApplyMigrations.ts";
@@ -251,6 +252,7 @@ export const Database = Resource<Database>("Cloudflare.D1Database");
 
 export const DatabaseProvider = () =>
   Provider.succeed(Database, {
+    pricing: D1Pricing,
     stables: ["databaseId", "accountId"],
     diff: Effect.fn(function* ({ id, olds = {}, news = {}, output }) {
       const { accountId } = yield* yield* CloudflareEnvironment;

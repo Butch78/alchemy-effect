@@ -7,6 +7,7 @@ import { createPhysicalName } from "../../PhysicalName.ts";
 import * as Provider from "../../Provider.ts";
 import { isResourceOfType, Resource } from "../../Resource.ts";
 import { CloudflareEnvironment } from "../CloudflareEnvironment.ts";
+import { KvPricing } from "../CloudflarePricing.ts";
 import type { Providers } from "../Providers.ts";
 
 export const isNamespace = (value: unknown): value is Namespace =>
@@ -73,6 +74,7 @@ export const Namespace = Resource<Namespace>("Cloudflare.KV.Namespace", {
 
 export const NamespaceProvider = () =>
   Provider.succeed(Namespace, {
+    pricing: KvPricing,
     stables: ["namespaceId", "accountId"],
     diff: Effect.fn(function* ({ id, olds = {}, news = {}, output }) {
       const { accountId } = yield* yield* CloudflareEnvironment;

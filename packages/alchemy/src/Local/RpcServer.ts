@@ -40,7 +40,14 @@ export interface RpcProxyApi {
    */
   readonly getProvider: <R extends ResourceLike>(
     type: R["Type"],
-  ) => Promise<RpcSerialization.RpcWrapped<ProviderService<R>>>;
+    // `pricing` is plain synchronous cost-estimation data/functions (see
+    // `../Cost.ts`) — never Effect/Stream-shaped, so it doesn't fit
+    // `RpcWrapped`'s handler recognition and isn't meaningful to proxy over
+    // RPC anyway (it's pure math, identical regardless of which process
+    // evaluates it). Omitted here rather than taught to `RpcWrapped`.
+  ) => Promise<
+    RpcSerialization.RpcWrapped<Omit<ProviderService<R>, "pricing">>
+  >;
 }
 
 const serverPlatformLayer = platformLayer({
@@ -128,10 +135,11 @@ export const layerServer = (
               if (!provider) {
                 throw new Error(`Provider "${type}" not found`);
               }
-              return RpcSerialization.wrapRpcHandlers(
-                provider as ProviderService<R>,
-                ["tail"],
-              );
+              // See the `pricing` comment on `RpcProxyApi.getProvider` —
+              // stripped here rather than sent over the wire.
+              const { pricing: _pricing, ...rpcSafe } =
+                provider as ProviderService<R>;
+              return RpcSerialization.wrapRpcHandlers(rpcSafe, ["tail"]);
             },
           }),
         parentConnected: () => Deferred.doneUnsafe(connected, Effect.void),
