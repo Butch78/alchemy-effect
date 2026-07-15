@@ -66,9 +66,49 @@ const getStartCoordination = (key: object) => {
   return coordination;
 };
 
+/**
+ * Options accepted by {@link layer} — Cloudflare's own container startup
+ * options plus Alchemy-only scheduling knobs layered on top.
+ */
+export interface ContainerLayerOptions extends ContainerStartupOptions {
+  /**
+   * Keep this Durable Object's container warm for its lifetime: after the
+   * initial eager start, periodically re-run the same readiness check that a
+   * real request would (restart the container and re-probe its default
+   * port if it has gone idle/cold) on this schedule — instead of waiting for
+   * the next real request to discover it needs a fresh boot.
+   *
+   * This keeps *one* container warm; it does not create a pool of spares.
+   * Cloudflare binds a container 1:1 to the Durable Object that owns it, so
+   * there is no such thing as a pre-warmed instance handed off to a
+   * different DO. To warm containers ahead of their first real request
+   * (across many DOs), see {@link warmPool} instead.
+   *
+   * A tick where the container is already warm costs a single local state
+   * read (no Cloudflare API round trip, no billing impact) plus a
+   * ready-port cache hit — both lock-free, so it never contends with real
+   * traffic. Only a container that has actually gone cold pays the restart
+   * + readiness cost, and it pays it on the schedule's cadence rather than
+   * on the critical path of the next real request.
+   *
+   * @example Keep warm every 4 minutes, bounded to a 1-hour session window
+   * ```typescript
+   * import * as Duration from "effect/Duration";
+   * import * as Schedule from "effect/Schedule";
+   *
+   * Cloudflare.Containers.layer(Sandbox, {
+   *   keepWarm: Schedule.spaced(Duration.minutes(4)).pipe(
+   *     Schedule.upTo({ duration: Duration.hours(1) }),
+   *   ),
+   * });
+   * ```
+   */
+  keepWarm?: Schedule.Schedule<unknown, void>;
+}
+
 export const layer = <Image extends Container.Decl.Any>(
   container: Image,
-  options?: ContainerStartupOptions,
+  options?: ContainerLayerOptions,
 ) => {
   const id = (container as any)["~alchemy/Id"] as string;
   // Provide the *started* instance under the same tag `yield* MyContainer`
@@ -84,7 +124,14 @@ export const layer = <Image extends Container.Decl.Any>(
  */
 export const startContainer = Effect.fn(function* <
   Image extends Container.Decl.Any,
->(containerEff: Image, options?: ContainerStartupOptions) {
+>(containerEff: Image, options?: ContainerLayerOptions) {
+  // `keepWarm` is an Alchemy-only scheduling knob layered on top of
+  // Cloudflare's real container startup options — read it here, but pass
+  // `options` through to `container.start()` unchanged below (it structurally
+  // satisfies `ContainerStartupOptions`; Cloudflare's runtime ignores the
+  // extra key rather than rejecting it).
+  const keepWarm = options?.keepWarm;
+
   const bindEff = (containerEff as any)["~alchemy/Container/Binding"] as
     | Effect.Effect<Effect.Effect<Container>, never, any>
     | undefined;
@@ -399,6 +446,26 @@ export const startContainer = Effect.fn(function* <
   if (phase === "runtime") {
     // erase the RuntimeContext color (we are applying it eagerly as an optimization only during runtime)
     yield* ensureRunning as Effect.Effect<void>;
+
+    if (keepWarm) {
+      // Proactively re-run the full readiness check (not just `ensureRunning`)
+      // on the given schedule, so a container that went idle/cold between
+      // real requests is already warm again by the time the next one
+      // arrives — port 3000 mirrors the same convention `base.fetch` below
+      // uses for the container's default RPC/fetch port. Detached: this
+      // fiber outlives any single request and must not fail the DO if a
+      // tick errors (the eager start above already covers the first run, so
+      // a transient failure here just means the next tick tries again).
+      yield* Effect.forkDetach(
+        ensureReady(3000).pipe(
+          Effect.tapError((err) =>
+            Effect.logDebug(`keepWarm tick failed: ${err}`),
+          ),
+          Effect.ignore,
+          Effect.repeat(keepWarm),
+        ),
+      );
+    }
   }
 
   // The container exposes its non-`fetch` shape methods (declared on the
