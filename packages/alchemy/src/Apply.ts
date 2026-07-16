@@ -3,6 +3,9 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import type { Simplify } from "effect/Types";
+import type { ActionLike } from "./Action.ts";
+import { makeResolveContext } from "./ActionRuntimeContext.ts";
+import { RuntimeContext } from "./RuntimeContext.ts";
 import {
   Artifacts,
   ArtifactStore,
@@ -1124,6 +1127,25 @@ const executeNode = (
 // `--force` is set). The output value is written to `tracker[fqn].output`
 // so downstream Output evaluation works identically to resource attrs.
 
+/**
+ * Run an Action body, resolving any Outputs it captured via `yield* output`
+ * during init against the current tracker and exposing them to the body through
+ * the resolve {@link RuntimeContext}. See {@link makeCaptureContext}.
+ */
+const runAction = Effect.fn("apply.runAction")(function* (
+  task: ActionLike,
+  input: any,
+  outputs: Record<string, any>,
+) {
+  const resolved: Record<string, unknown> = {};
+  for (const [key, output] of Object.entries(task.Captures)) {
+    resolved[key] = yield* Output.evaluate(output, outputs);
+  }
+  return yield* task
+    .Run(input)
+    .pipe(Effect.provideService(RuntimeContext, makeResolveContext(resolved)));
+});
+
 const executeActionNode = (
   fqn: string,
   node: ActionApply,
@@ -1202,9 +1224,12 @@ const executeActionNode = (
     // until its run actually starts.
     yield* report("pending");
     yield* waitForDeps(
-      Object.keys(Output.resolveUpstream(node.input)).filter(
-        (f) => f in readyStable,
-      ),
+      [
+        ...new Set([
+          ...Object.keys(Output.resolveUpstream(node.input)),
+          ...Object.keys(Output.upstreamAny(task.Captures)),
+        ]),
+      ].filter((f) => f in readyStable),
     );
 
     const outputs = getOutputs();
@@ -1223,7 +1248,7 @@ const executeActionNode = (
     });
     yield* report("running");
 
-    const result = yield* task.Run(resolvedInput);
+    const result = yield* runAction(task, resolvedInput, outputs);
 
     yield* commit<RanActionState>({
       kind: "action",
@@ -1447,7 +1472,7 @@ const converge = Effect.fn(function* (
         } satisfies RunningActionState,
       });
 
-      const result = yield* node.def.Run(newInput);
+      const result = yield* runAction(node.def, newInput, outputs);
 
       yield* state.set({
         stack: stackName,

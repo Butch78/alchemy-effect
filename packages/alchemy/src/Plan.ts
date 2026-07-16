@@ -543,7 +543,18 @@ export const make = <A>(
         (action) =>
           [
             action.FQN,
-            Object.values(Output.upstreamAny(action.Input)).map((r) => r.FQN),
+            // An Action depends on the resources referenced by its Input *and*
+            // any Output captured via `yield* output` inside its init Effect.
+            Array.from(
+              new Set([
+                ...Object.values(Output.upstreamAny(action.Input)).map(
+                  (r) => r.FQN,
+                ),
+                ...Object.values(Output.upstreamAny(action.Captures)).map(
+                  (r) => r.FQN,
+                ),
+              ]),
+            ),
           ] as const,
       ),
     ]);
@@ -572,7 +583,8 @@ export const make = <A>(
         const bindDeps = bindingUpstreamDependencies[fqn] ?? [];
         return [fqn, [...new Set([...propDeps, ...bindDeps])]];
       }),
-      // Actions have no bindings — their upstream is purely their input.
+      // Actions have no bindings — their upstream is input + init captures,
+      // both already folded into newUpstreamDependencies above.
       ...actions.map((action): [string, string[]] => {
         const fqn = action.FQN;
         return [fqn, newUpstreamDependencies[fqn] ?? []];
@@ -1212,6 +1224,7 @@ export const make = <A>(
                   LogicalId: logicalId,
                   Type: persisted.actionType,
                   Input: persisted.input,
+                  Captures: {},
                   Run: () => undefined as any,
                   Output: undefined as any,
                 } satisfies ActionLike,
