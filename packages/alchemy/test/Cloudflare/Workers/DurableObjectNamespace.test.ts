@@ -71,6 +71,46 @@ test(
   { timeout: 60_000 },
 );
 
+// `locationHint` steers where an instance is CREATED. Two brand-new names —
+// nothing has addressed them, so each is created by this request — are hinted
+// at opposite sides of the planet and asked which colo they ended up in. If
+// the hint were dropped on the floor (the old `getByName(name)` signature
+// ignored Cloudflare's options bag), both would be created wherever this test
+// runs from and report the SAME colo.
+//
+// The assertion is "different colos", not "this exact colo": a hint is
+// best-effort — Cloudflare places the instance in the nearest location it can
+// to the hinted region, which is not necessarily a colo inside it.
+test(
+  "locationHint places new instances in different regions",
+  Effect.gen(function* () {
+    const { url } = yield* stack;
+    const client = freshConn(yield* HttpClient.HttpClient);
+
+    const coloFor = (hint: string) =>
+      client.get(`${url}/colo?name=${crypto.randomUUID()}&hint=${hint}`).pipe(
+        Effect.flatMap((res) =>
+          res.status === 200
+            ? Effect.flatMap(res.json, (body) => {
+                const colo = (body as { colo?: string }).colo;
+                return colo && colo !== "unknown"
+                  ? Effect.succeed(colo)
+                  : Effect.fail(new Error(`no colo: ${JSON.stringify(body)}`));
+              })
+            : Effect.fail(new Error(`Worker not ready: ${res.status}`)),
+        ),
+        Effect.retry({ schedule: readinessSchedule, times: readinessRetries }),
+      );
+
+    const [wnam, apac] = yield* Effect.all([coloFor("wnam"), coloFor("apac")], {
+      concurrency: 2,
+    });
+
+    expect(wnam).not.toBe(apac);
+  }).pipe(logLevel),
+  { timeout: 60_000 },
+);
+
 // Reproduces the `tick` streaming example from the Durable Objects tutorial:
 // https://alchemy.run/cloudflare/compute/durable-objects
 //
