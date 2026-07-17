@@ -1173,13 +1173,17 @@ export const DurableObject: DurableObjectClass = taggedFunction(
             name: string,
             options?: DurableObjectGetDurableObjectOptions,
           ) => makeRpcStub(binding.getByName(name, options)),
-          // newUniqueId: () => use((ns) => ns.newUniqueId()),
-          // idFromName: (name: string) => use((ns) => ns.idFromName(name)),
-          // idFromString: (id: string) => use((ns) => ns.idFromString(id)),
-          // get: (
-          //   id: cf.DurableObjectId,
-          //   options?: cf.DurableObjectNamespaceGetDurableObjectOptions,
-          // ) => use((ns) => makeRpcStub(ns.get(id, options))),
+          // `get(id, options)` is the other way onto an instance — and the one
+          // Cloudflare's docs reach for to pass a `locationHint`. It, and the
+          // three id constructors that are the only way to obtain an `id` to
+          // hand it, are plain pass-throughs to the underlying namespace.
+          newUniqueId: () => binding.newUniqueId(),
+          idFromName: (name: string) => binding.idFromName(name),
+          idFromString: (id: string) => binding.idFromString(id),
+          get: (
+            id: DurableObjectId,
+            options?: DurableObjectGetDurableObjectOptions,
+          ) => makeRpcStub(binding.get(id, options)),
           // jurisdiction: (jurisdiction: cf.DurableObjectJurisdiction) =>
           //   use((ns) => ns.jurisdiction(jurisdiction) as any),
         };

@@ -58,6 +58,22 @@ export default class DurableObjectWorkerEnvironmentWorker extends Cloudflare.Wor
           return yield* HttpServerResponse.json({ colo });
         }
 
+        // The same thing the long way round — `get(idFromName(name))` is the
+        // other route onto an instance, and the one Cloudflare's own docs
+        // reach for when they pass a `locationHint`.
+        if (request.method === "GET" && url.pathname === "/colo-by-id") {
+          const name = url.searchParams.get("name") ?? "default";
+          const hint = LOCATION_HINTS.find(
+            (candidate) => candidate === url.searchParams.get("hint"),
+          );
+          const object = objects.get(
+            objects.idFromName(name),
+            hint ? { locationHint: hint } : undefined,
+          );
+          const colo = yield* object.colo().pipe(Effect.orDie);
+          return yield* HttpServerResponse.json({ colo });
+        }
+
         // Mirrors the tutorial's `/tick/:n` route verbatim — forwards the
         // Stream returned by the DO's `tick` RPC method straight onto the
         // HTTP response.

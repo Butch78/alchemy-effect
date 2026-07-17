@@ -72,12 +72,14 @@ test(
 );
 
 // Every name here is a fresh UUID, so each is CREATED by this test's request —
-// which is the only moment a `locationHint` has any say.
-const coloFor = (url: string, hint?: string) =>
+// which is the only moment a `locationHint` has any say. `route` picks which
+// way onto the instance is exercised: `/colo` uses `getByName(name, options)`,
+// `/colo-by-id` the longer `get(idFromName(name), options)`.
+const coloFor = (url: string, hint?: string, route = "/colo") =>
   Effect.gen(function* () {
     const client = freshConn(yield* HttpClient.HttpClient);
     const query = `name=${crypto.randomUUID()}${hint ? `&hint=${hint}` : ""}`;
-    return yield* client.get(`${url}/colo?${query}`).pipe(
+    return yield* client.get(`${url}${route}?${query}`).pipe(
       Effect.flatMap((res) =>
         res.status === 200
           ? Effect.flatMap(res.json, (body) => {
@@ -132,6 +134,29 @@ test(
 
     const [wnam, apac] = yield* Effect.all(
       [coloFor(url, "wnam"), coloFor(url, "apac")],
+      { concurrency: 2 },
+    );
+
+    expect(wnam).not.toBe(apac);
+  }).pipe(logLevel),
+  { timeout: 60_000 },
+);
+
+// `get(id, options)` is the other way onto an instance, and the one
+// Cloudflare's own docs use to pass a `locationHint`. It was declared on the
+// namespace interface but never implemented — TypeScript said it existed while
+// it was `undefined` at runtime, taking `idFromName` / `idFromString` /
+// `newUniqueId` (the only ways to get an `id` to hand it) down with it.
+test(
+  "locationHint applies through get(idFromName(name), options)",
+  Effect.gen(function* () {
+    const { url } = yield* stack;
+
+    const [wnam, apac] = yield* Effect.all(
+      [
+        coloFor(url, "wnam", "/colo-by-id"),
+        coloFor(url, "apac", "/colo-by-id"),
+      ],
       { concurrency: 2 },
     );
 
