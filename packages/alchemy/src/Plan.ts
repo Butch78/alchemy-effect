@@ -35,7 +35,9 @@ import { generateInstanceId, InstanceId } from "./InstanceId.ts";
 import * as Output from "./Output.ts";
 import {
   findProviderByType,
+  missingProviderError,
   Provider,
+  tryFindProviderByType,
   type ProviderService,
 } from "./Provider.ts";
 import {
@@ -1287,7 +1289,19 @@ export const make = <A>(
             if (oldState) {
               const { logicalId } = parseFqn(fqn);
               const resourceType = oldState.resourceType;
-              const provider = yield* findProviderByType(resourceType);
+              // A "zombie" row references a type with no registered provider
+              // (removed from the program, or renamed without an alias).
+              // That is fatal: the program and state disagree, and without
+              // the provider the row's physical resource cannot be deleted
+              // anyway. Die at plan time with a typed error naming the row
+              // and the remediation instead of limping into a partial apply.
+              const providerOption = yield* tryFindProviderByType(resourceType);
+              if (Option.isNone(providerOption)) {
+                return yield* Effect.die(
+                  missingProviderError(resourceType, fqn),
+                );
+              }
+              const provider = providerOption.value;
               // NOTE: an attr-less row (interrupted create) is NOT recovered
               // here. Apply's `deleteResource` performs the authoritative
               // read-then-delete recovery — it also covers replaced-chain
