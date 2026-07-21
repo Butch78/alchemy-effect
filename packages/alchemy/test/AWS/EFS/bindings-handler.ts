@@ -182,10 +182,11 @@ export default EfsBindingsFunction.make(
           }).pipe(
             Effect.catchTag("AccessPointAlreadyExists", () =>
               describeAccessPoints().pipe(
-                Effect.map((r) =>
-                  r.AccessPoints?.find(
-                    (ap) => ap.ClientToken === ACCESS_POINT_CLIENT_TOKEN,
-                  )!,
+                Effect.map(
+                  (r) =>
+                    r.AccessPoints?.find(
+                      (ap) => ap.ClientToken === ACCESS_POINT_CLIENT_TOKEN,
+                    )!,
                 ),
               ),
             ),

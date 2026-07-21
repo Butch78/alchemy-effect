@@ -300,10 +300,7 @@ type ObservedTotalTls = acm.GetTotalTlResponse | acm.UpdateTotalTlResponse;
 const initialStateOf = (
   output: TotalTlsAttributes | undefined,
   observed: ObservedTotalTls,
-): Pick<
-  TotalTlsAttributes,
-  "initialEnabled" | "initialCertificateAuthority"
-> =>
+): Pick<TotalTlsAttributes, "initialEnabled" | "initialCertificateAuthority"> =>
   output !== undefined
     ? {
         initialEnabled: output.initialEnabled,

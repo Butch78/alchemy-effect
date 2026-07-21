@@ -87,9 +87,7 @@ const deployUnlessQuotaReached = (
     .deploy(eff)
     .pipe(
       Effect.catchCause(
-        (
-          cause,
-        ): Effect.Effect<CertificateAttributes | undefined, any, never> =>
+        (cause): Effect.Effect<CertificateAttributes | undefined, any, never> =>
           findQuotaError(cause)
             ? Effect.succeed(undefined)
             : Effect.failCause(cause),

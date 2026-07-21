@@ -361,11 +361,20 @@ const SECTIONS: Section[] = [
     },
   },
   {
-    heading: "Drizzle",
+    heading: "SQL",
     intro:
-      "Drizzle schemas as Stack resources — migration SQL regenerated on deploy and applied by whichever database resource consumes it; Worker runtime wiring lives under Cloudflare → Data.",
+      "One home for SQL in alchemy — low-level effect-sql clients (alchemy/SQL), Drizzle ORM, the migrationsDir contract, and the per-execution connection lifecycle; Worker runtime wiring lives under Cloudflare → Data.",
     pages: {
-      slugs: ["drizzle/index", "drizzle/migrations"],
+      slugs: [
+        "sql/index",
+        "sql/effect-sql/postgres",
+        "sql/effect-sql/d1",
+        "sql/effect-sql/migrations",
+        "sql/effect-sql/lifecycle",
+        "sql/drizzle/postgres",
+        "sql/drizzle/d1",
+        "sql/drizzle/migrations",
+      ],
     },
   },
   {
