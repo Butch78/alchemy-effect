@@ -2074,7 +2074,9 @@ const composeManagedIngress = (
       }
     }
 
-    const actionToListenerAction = (action: NormalizedAction): ListenerAction =>
+    const actionToListenerAction = (
+      action: NormalizedAction,
+    ): ListenerAction =>
       action.type === "redirect"
         ? {
             type: "redirect",
