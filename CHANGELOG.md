@@ -1,3 +1,55 @@
+## v2.0.0-beta.64
+
+### &nbsp;&nbsp;&nbsp;🚨 Breaking Changes
+
+- **aws**:
+  - Generate 100% AWS Resource & Binding coverage &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/797 [<samp>(532c8)</samp>](https://github.com/alchemy-run/alchemy/commit/532c8118)
+  - Unified container platforms — ECS Task/Service, EKS Deployment/Job/Manifest, Dockerfile.inline image composition &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/867 [<samp>(4d713)</samp>](https://github.com/alchemy-run/alchemy/commit/4d7139c6)
+
+### &nbsp;&nbsp;&nbsp;🚀 Features
+
+- **aws**:
+  - **eks**: HelmChart support &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/891 [<samp>(22de7)</samp>](https://github.com/alchemy-run/alchemy/commit/22de7dd3)
+  - **rds**: SkipFinalSnapshot option — final snapshot on deliberate teardown &nbsp;-&nbsp; by **Zé Yuri** in https://github.com/alchemy-run/alchemy/issues/877 [<samp>(28ca6)</samp>](https://github.com/alchemy-run/alchemy/commit/28ca6f43)
+- **bundle**:
+  - Rewrite pure plugin on rolldown 1.1 native MagicString &nbsp;-&nbsp; by **John Royal** in https://github.com/alchemy-run/alchemy/issues/849 [<samp>(dee6f)</samp>](https://github.com/alchemy-run/alchemy/commit/dee6f91d)
+- **cloudflare**:
+  - **workers**:
+    - Add Workers AI binding (Cloudflare.Workers.AI) &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/850 [<samp>(9ea1d)</samp>](https://github.com/alchemy-run/alchemy/commit/9ea1dbfd)
+    - Place a Durable Object in a region with locationHint &nbsp;-&nbsp; by **Matthew Aylward** in https://github.com/alchemy-run/alchemy/issues/851 [<samp>(c3ed7)</samp>](https://github.com/alchemy-run/alchemy/commit/c3ed7403)
+    - Python Workers (main: worker.py) &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/861 [<samp>(75952)</samp>](https://github.com/alchemy-run/alchemy/commit/75952e4c)
+- **drizzle**:
+  - D1 support — Drizzle.D1, alchemy/SQL clients, example, docs &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/887 [<samp>(c6551)</samp>](https://github.com/alchemy-run/alchemy/commit/c65518a2)
+- **github**:
+  - GitHub Enterprise support + Environment resource &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/845 [<samp>(c954a)</samp>](https://github.com/alchemy-run/alchemy/commit/c954a1c2)
+
+### &nbsp;&nbsp;&nbsp;🐞 Bug Fixes
+
+- Use distilled auto-paginating streams for multi-page list calls &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/915 [<samp>(2f9da)</samp>](https://github.com/alchemy-run/alchemy/commit/2f9da9df)
+- Full-suite convergence — provider fixes, flake hardening, bounded test concurrency &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/916 [<samp>(0259b)</samp>](https://github.com/alchemy-run/alchemy/commit/0259b97c)
+- **aws**:
+  - AWS_REGION env overrides SSO profile/stored region &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/895 [<samp>(fd9a4)</samp>](https://github.com/alchemy-run/alchemy/commit/fd9a4b3a)
+  - **ecs**: Task-definition revision reaping + delete-path family/role sweep &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/902 [<samp>(2a884)</samp>](https://github.com/alchemy-run/alchemy/commit/2a8841a6)
+  - **rds**: Fingerprint-guard MasterUserPassword — stop re-sending it on every reconcile &nbsp;-&nbsp; by **Zé Yuri** in https://github.com/alchemy-run/alchemy/issues/876 [<samp>(4ae06)</samp>](https://github.com/alchemy-run/alchemy/commit/4ae06dbe)
+- **cloudflare**:
+  - Handle wasm in vite dev &nbsp;-&nbsp; by **John Royal** in https://github.com/alchemy-run/alchemy/issues/881 [<samp>(d7eab)</samp>](https://github.com/alchemy-run/alchemy/commit/d7eabde7)
+  - **workers**:
+    - Register esmExternalRequirePlugin in direct Worker bundler &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/889 [<samp>(15c7b)</samp>](https://github.com/alchemy-run/alchemy/commit/15c7b8e3)
+    - Converge plans with Effect-valued env bindings &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/890 [<samp>(96bb9)</samp>](https://github.com/alchemy-run/alchemy/commit/96bb9138)
+    - Rely on rolldown-plugin for esmExternalRequire &nbsp;-&nbsp; by **John Royal** in https://github.com/alchemy-run/alchemy/issues/909 [<samp>(3a7c8)</samp>](https://github.com/alchemy-run/alchemy/commit/3a7c880e)
+    - Retry asset upload session when completion JWT is missing &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/914 [<samp>(33830)</samp>](https://github.com/alchemy-run/alchemy/commit/33830297)
+    - Queue-consumer wiring lost when Consumer reconciles mid workerd start &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/917 [<samp>(0d4df)</samp>](https://github.com/alchemy-run/alchemy/commit/0d4dfc50)
+- **engine**:
+  - Destroy no longer orphans physical resources of attr-less creating rows &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/862 [<samp>(26883)</samp>](https://github.com/alchemy-run/alchemy/commit/26883b5b)
+  - Preserve name uniqueness when createPhysicalName truncates &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/868 [<samp>(d6317)</samp>](https://github.com/alchemy-run/alchemy/commit/d63173c3)
+  - Binding-diff stability — plain-data binding persistence + deterministic sid order &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/898 [<samp>(58cfe)</samp>](https://github.com/alchemy-run/alchemy/commit/58cfe0d7)
+  - Destroy robustness — aggregated GC failures + fatal zombie rows &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/899 [<samp>(eb63a)</samp>](https://github.com/alchemy-run/alchemy/commit/eb63af6d)
+  - --force refreshes stale bound attrs from the forced reconcile &nbsp;-&nbsp; by **sam** in https://github.com/alchemy-run/alchemy/issues/900 [<samp>(99b62)</samp>](https://github.com/alchemy-run/alchemy/commit/99b62998)
+
+##### &nbsp;&nbsp;&nbsp;&nbsp;[View changes on GitHub](https://github.com/alchemy-run/alchemy/compare/v2.0.0-beta.63...HEAD)
+
+---
+
 ## v2.0.0-beta.63
 
 ### &nbsp;&nbsp;&nbsp;🚀 Features
